@@ -21,23 +21,23 @@ async def upload_video(
     file: UploadFile = File(...),
     target_language: str = Form(...)
 ):
-    # Save uploaded video
+    # Save uploaded file
     file_location = f"/tmp/{file.filename}"
     with open(file_location, "wb") as buffer:
         buffer.write(await file.read())
 
-    # Extract audio to .mp3
+    # Extract audio
     audio_path = file_location.rsplit(".", 1)[0] + ".mp3"
     try:
         video = VideoFileClip(file_location)
         video.audio.write_audiofile(audio_path)
     except Exception as e:
-        return JSONResponse(status_code=400, content={"error": f"Audio extraction failed: {str(e)}"})
+        return JSONResponse(status_code=500, content={"error": f"Audio extraction failed: {str(e)}"})
 
-    # Transcribe audio
+    # Transcription
     try:
         with open(audio_path, "rb") as audio_file:
-            headers = { "xi-api-key": ELEVENLABS_API_KEY }
+            headers = {"xi-api-key": ELEVENLABS_API_KEY}
             response = requests.post(
                 "https://api.elevenlabs.io/v1/speech-to-text",
                 headers=headers,
@@ -49,12 +49,12 @@ async def upload_video(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Transcription failed: {str(e)}"})
 
-    # Clone voice
+    # Voice cloning
     try:
         with open(audio_path, "rb") as audio_file:
-            headers = { "xi-api-key": ELEVENLABS_API_KEY }
-            files = { "files": audio_file }
-            data = { "name": f"voice_clone_{file.filename}", "labels": "{}" }
+            headers = {"xi-api-key": ELEVENLABS_API_KEY}
+            files = {"files": audio_file}
+            data = {"name": f"voice_clone_{file.filename}", "labels": "{}"}
             voice_response = requests.post(
                 "https://api.elevenlabs.io/v1/voices/add",
                 headers=headers,
@@ -82,9 +82,33 @@ async def upload_video(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Translation failed: {str(e)}"})
 
+    # Generate dubbed audio using TTS
+    try:
+        tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+        headers = {
+            "xi-api-key": ELEVENLABS_API_KEY,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "text": translated_text,
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.75
+            }
+        }
+        tts_response = requests.post(tts_url, headers=headers, json=payload)
+        dubbed_audio_path = file_location.rsplit(".", 1)[0] + f"_{target_language}.mp3"
+        with open(dubbed_audio_path, "wb") as out_file:
+            out_file.write(tts_response.content)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"TTS failed: {str(e)}"})
+
     return {
-        "message": "Transcription, voice cloning, and translation complete",
+        "message": "Transcription, voice cloning, translation, and dubbing complete",
         "original_transcript": transcript_text,
         "translated_transcript": translated_text,
-        "voice_id": voice_id
+        "voice_id": voice_id,
+        "dubbed_audio_path": dubbed_audio_path
     }
+
