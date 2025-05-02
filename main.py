@@ -48,9 +48,11 @@ async def upload_video(
                 headers=headers,
                 files=files
             )
-            result = response.json()
-            transcript = result.get("text", "")
-            voice_id = result.get("voice_id", "unknown")
+           result = response.json()
+print("ElevenLabs response:", result)
+
+transcript = result.get("text", "")
+voice_id = result.get("voice_id") or "unknown"
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Transcription failed: {str(e)}"})
 
