@@ -38,7 +38,7 @@ async def upload_video(file: UploadFile = File(...)):
             response = requests.post(
                 "https://api.elevenlabs.io/v1/speech-to-text",
                 headers=headers,
-                data={"model_id": "whisper-large-v3"},
+                data={"model_id": "scribe_v1"},
                 files={"file": audio_file}
             )
             transcript = response.json()
