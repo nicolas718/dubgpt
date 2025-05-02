@@ -1,16 +1,16 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
+import os
 import requests
 from moviepy.editor import VideoFileClip
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 
 app = FastAPI()
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY")
 
 @app.get("/")
 def read_root():
@@ -26,7 +26,7 @@ async def upload_video(
     with open(file_location, "wb") as buffer:
         buffer.write(await file.read())
 
-    # Extract audio as .mp3
+    # Extract audio
     audio_path = file_location.rsplit(".", 1)[0] + ".mp3"
     try:
         video = VideoFileClip(file_location)
@@ -34,39 +34,44 @@ async def upload_video(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Audio extraction failed: {str(e)}"})
 
-    # Transcribe and clone voice
+    # Transcription & voice cloning
     try:
         with open(audio_path, "rb") as audio_file:
-            headers = { "xi-api-key": ELEVENLABS_API_KEY }
-            files = { "audio": audio_file }
+            headers = {
+                "xi-api-key": ELEVENLABS_API_KEY
+            }
+            files = {
+                "audio": audio_file
+            }
             response = requests.post(
-                "https://api.elevenlabs.io/v1/speech-to-speech",
+                "https://api.elevenlabs.io/v1/speech-to-text/scribe-v1",
                 headers=headers,
                 files=files
             )
-            transcript_data = response.json()
-            transcript_text = transcript_data.get("text", "")
-            voice_id = transcript_data.get("voice_id", None)
+            result = response.json()
+            transcript = result.get("text", "")
+            voice_id = result.get("voice_id", "unknown")
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Transcription or voice cloning failed: {str(e)}"})
+        return JSONResponse(status_code=500, content={"error": f"Transcription failed: {str(e)}"})
 
     # Translate transcript
     try:
-        translate_url = f"https://translation.googleapis.com/language/translate/v2"
-        params = {
-            "q": transcript_text,
-            "target": target_language,
-            "key": GOOGLE_API_KEY
-        }
-        response = requests.post(translate_url, params=params)
-        translated_data = response.json()
-        translated_text = translated_data["data"]["translations"][0]["translatedText"]
+        translate_response = requests.post(
+            f"https://translation.googleapis.com/language/translate/v2?key={GOOGLE_TRANSLATE_API_KEY}",
+            json={
+                "q": transcript,
+                "target": target_language,
+                "format": "text"
+            }
+        )
+        translate_data = translate_response.json()
+        translated_text = translate_data["data"]["translations"][0]["translatedText"]
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Translation failed: {str(e)}"})
 
     return {
         "message": "Transcription, voice cloning, and translation complete",
-        "original_transcript": transcript_text,
+        "original_transcript": transcript,
         "translated_transcript": translated_text,
         "voice_id": voice_id
     }
