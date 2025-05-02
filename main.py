@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 import os
 import requests
@@ -10,13 +10,17 @@ load_dotenv()
 app = FastAPI()
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY")
 
 @app.get("/")
 def read_root():
     return {"message": "DubGPT backend is live."}
 
 @app.post("/upload")
-async def upload_video(file: UploadFile = File(...)):
+async def upload_video(
+    file: UploadFile = File(...),
+    target_language: str = Form(...)
+):
     # Save uploaded video
     file_location = f"/tmp/{file.filename}"
     with open(file_location, "wb") as buffer:
@@ -30,7 +34,7 @@ async def upload_video(file: UploadFile = File(...)):
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": f"Audio extraction failed: {str(e)}"})
 
-    # Step 1: Transcribe audio with ElevenLabs Scribe
+    # Transcribe audio
     try:
         with open(audio_path, "rb") as audio_file:
             headers = { "xi-api-key": ELEVENLABS_API_KEY }
@@ -41,22 +45,16 @@ async def upload_video(file: UploadFile = File(...)):
                 files={"file": audio_file}
             )
             transcript_data = response.json()
+            transcript_text = transcript_data.get("text", "")
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Transcription failed: {str(e)}"})
 
-    # Step 2: Clone the speaker's voice
+    # Clone voice
     try:
         with open(audio_path, "rb") as audio_file:
-            headers = {
-                "xi-api-key": ELEVENLABS_API_KEY
-            }
-            files = {
-                "files": audio_file
-            }
-            data = {
-                "name": f"voice_clone_{file.filename}",
-                "labels": "{}"
-            }
+            headers = { "xi-api-key": ELEVENLABS_API_KEY }
+            files = { "files": audio_file }
+            data = { "name": f"voice_clone_{file.filename}", "labels": "{}" }
             voice_response = requests.post(
                 "https://api.elevenlabs.io/v1/voices/add",
                 headers=headers,
@@ -70,8 +68,23 @@ async def upload_video(file: UploadFile = File(...)):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Voice cloning failed: {str(e)}"})
 
+    # Translate transcript
+    try:
+        translate_url = "https://translation.googleapis.com/language/translate/v2"
+        translate_params = {
+            "q": transcript_text,
+            "target": target_language,
+            "format": "text",
+            "key": GOOGLE_TRANSLATE_API_KEY
+        }
+        translate_response = requests.post(translate_url, data=translate_params)
+        translated_text = translate_response.json()["data"]["translations"][0]["translatedText"]
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Translation failed: {str(e)}"})
+
     return {
-        "message": "Transcription and voice cloning successful",
-        "transcript": transcript_data,
+        "message": "Transcription, voice cloning, and translation complete",
+        "original_transcript": transcript_text,
+        "translated_transcript": translated_text,
         "voice_id": voice_id
     }
