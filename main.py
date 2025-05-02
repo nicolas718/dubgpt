@@ -1,14 +1,13 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
-import os
 import requests
 from moviepy.editor import VideoFileClip
 from dotenv import load_dotenv
+import os
 
 load_dotenv()
 
 app = FastAPI()
-
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 
 @app.get("/")
@@ -17,7 +16,7 @@ def read_root():
 
 @app.post("/upload")
 async def upload_video(file: UploadFile = File(...)):
-    # Save uploaded video to temp directory
+    # Save uploaded file to local /tmp directory
     file_location = f"/tmp/{file.filename}"
     with open(file_location, "wb") as buffer:
         buffer.write(await file.read())
@@ -39,12 +38,12 @@ async def upload_video(file: UploadFile = File(...)):
             response = requests.post(
                 "https://api.elevenlabs.io/v1/speech-to-text",
                 headers=headers,
-                files={"audio": audio_file},
-                data={"model_id": "whisper-large-v3"}
+                data={"model_id": "whisper-large-v3"},
+                files={"file": audio_file}
             )
             transcript = response.json()
     except Exception as e:
-        return JSONResponse(status_code=400, content={"error": f"Transcription failed: {str(e)}"})
+        return JSONResponse(status_code=500, content={"error": f"Transcription failed: {str(e)}"})
 
     return {
         "message": "Transcription successful",
