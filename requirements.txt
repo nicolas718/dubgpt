@@ -3,4 +3,5 @@ uvicorn
 python-multipart
 moviepy
 requests
-dotenv
+python-dotenv
+imageio-ffmpeg
