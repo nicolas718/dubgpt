@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse
 import os
 import requests
 from moviepy.editor import VideoFileClip
@@ -111,8 +111,4 @@ async def upload_video(
         "voice_id": voice_id,
         "dubbed_audio_path": dubbed_audio_path
     }
-
-@app.get("/download-audio")
-def download_audio():
-    return FileResponse("/tmp/DUBGPTTEST_es.mp3", media_type="audio/mpeg", filename="dubbed_audio.mp3")
 
