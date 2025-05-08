@@ -4,6 +4,7 @@ import os
 import requests
 from moviepy.editor import VideoFileClip
 from dotenv import load_dotenv
+import subprocess
 
 load_dotenv()
 
@@ -21,7 +22,6 @@ async def upload_video(
     file: UploadFile = File(...),
     target_language: str = Form(...)
 ):
-    # Save uploaded file
     file_location = f"/tmp/{file.filename}"
     with open(file_location, "wb") as buffer:
         buffer.write(await file.read())
@@ -104,11 +104,26 @@ async def upload_video(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"TTS failed: {str(e)}"})
 
+    # Run Wav2Lip to generate final synced video
+    try:
+        output_video_path = file_location.rsplit(".", 1)[0] + f"_final_{target_language}.mp4"
+        subprocess.run([
+            "python3", "inference.py",
+            "--checkpoint_path", "checkpoints/wav2lip.pth",
+            "--face", file_location,
+            "--audio", dubbed_audio_path,
+            "--outfile", output_video_path
+        ], check=True)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Wav2Lip failed: {str(e)}"})
+
     return {
-        "message": "Transcription, voice cloning, translation, and dubbing complete",
+        "message": "Full pipeline complete: Transcription, cloning, translation, dubbing, lip-sync done.",
         "original_transcript": transcript_text,
         "translated_transcript": translated_text,
         "voice_id": voice_id,
-        "dubbed_audio_path": dubbed_audio_path
+        "dubbed_audio_path": dubbed_audio_path,
+        "final_video_path": output_video_path
     }
+
 
