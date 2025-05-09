@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 import os
 import requests
 from moviepy.editor import VideoFileClip
@@ -122,8 +122,12 @@ async def upload_video(
         "original_transcript": transcript_text,
         "translated_transcript": translated_text,
         "voice_id": voice_id,
-        "dubbed_audio_path": dubbed_audio_path,
-        "final_video_path": output_video_path
+        "download_url": f"http://localhost:8000/download?path={output_video_path}"
     }
 
+@app.get("/download")
+def download_file(path: str):
+    if os.path.exists(path):
+        return FileResponse(path, media_type="video/mp4", filename=os.path.basename(path))
+    return JSONResponse(status_code=404, content={"error": "File not found"})
 
