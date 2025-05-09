@@ -1,10 +1,9 @@
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse
 import os
 import requests
 from moviepy.editor import VideoFileClip
 from dotenv import load_dotenv
-import subprocess
 
 load_dotenv()
 
@@ -12,10 +11,11 @@ app = FastAPI()
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY")
+WAV2LIP_VM_URL = "http://35.226.116.89:8000/lipsync"  # Your VM endpoint
 
 @app.get("/")
 def read_root():
-    return {"message": "DubGPT backend is live."}
+    return {"message": "DubGPT Railway backend is live."}
 
 @app.post("/upload")
 async def upload_video(
@@ -104,30 +104,29 @@ async def upload_video(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"TTS failed: {str(e)}"})
 
-    # Run Wav2Lip to generate final synced video
+    # Send files to VM for Wav2Lip
     try:
-        output_video_path = file_location.rsplit(".", 1)[0] + f"_final_{target_language}.mp4"
-        subprocess.run([
-            "python3", "inference.py",
-            "--checkpoint_path", "checkpoints/wav2lip.pth",
-            "--face", file_location,
-            "--audio", dubbed_audio_path,
-            "--outfile", output_video_path
-        ], check=True)
+        with open(file_location, "rb") as video_file, open(dubbed_audio_path, "rb") as audio_file:
+            vm_response = requests.post(
+                WAV2LIP_VM_URL,
+                files={
+                    "video": (file.filename, video_file),
+                    "audio": (f"dub_{target_language}.mp3", audio_file)
+                }
+            )
+            if vm_response.status_code != 200:
+                return JSONResponse(status_code=500, content={"error": "Wav2Lip VM processing failed", "details": vm_response.text})
+
+            result = vm_response.json()
+            return {
+                "message": "All processing complete, including Wav2Lip.",
+                "original_transcript": transcript_text,
+                "translated_transcript": translated_text,
+                "voice_id": voice_id,
+                "download_url": result["download_url"]
+            }
+
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Wav2Lip failed: {str(e)}"})
+        return JSONResponse(status_code=500, content={"error": f"Sending to Wav2Lip VM failed: {str(e)}"})
 
-    return {
-        "message": "Full pipeline complete: Transcription, cloning, translation, dubbing, lip-sync done.",
-        "original_transcript": transcript_text,
-        "translated_transcript": translated_text,
-        "voice_id": voice_id,
-        "download_url": f"http://localhost:8000/download?path={output_video_path}"
-    }
-
-@app.get("/download")
-def download_file(path: str):
-    if os.path.exists(path):
-        return FileResponse(path, media_type="video/mp4", filename=os.path.basename(path))
-    return JSONResponse(status_code=404, content={"error": "File not found"})
 
