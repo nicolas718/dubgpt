@@ -7,6 +7,7 @@ from moviepy.editor import VideoFileClip
 from dotenv import load_dotenv
 import shutil
 import uuid
+import subprocess
 
 load_dotenv()
 
@@ -35,9 +36,23 @@ async def upload_video(
     file_basename = file.filename.rsplit(".", 1)[0]
 
     # Save uploaded video to temp
-    video_path = f"/tmp/{session_id}_{file.filename}"
-    with open(video_path, "wb") as buffer:
+    original_path = f"/tmp/{session_id}_{file.filename}"
+    with open(original_path, "wb") as buffer:
         buffer.write(await file.read())
+
+    # Convert to .mp4 if needed
+    if not original_path.endswith(".mp4"):
+        video_path = original_path.rsplit(".", 1)[0] + ".mp4"
+        try:
+            subprocess.run([
+                "ffmpeg", "-i", original_path,
+                "-vcodec", "h264", "-acodec", "aac",
+                video_path
+            ], check=True)
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": f"Video conversion failed: {str(e)}"})
+    else:
+        video_path = original_path
 
     # Extract audio
     audio_path = video_path.rsplit(".", 1)[0] + ".mp3"
@@ -118,8 +133,8 @@ async def upload_video(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"TTS failed: {str(e)}"})
 
-    # Copy original video to static folder
-    final_video_filename = f"{session_id}_{file.filename}"
+    # Copy video to static folder
+    final_video_filename = f"{session_id}_{file_basename}.mp4"
     static_video_path = os.path.join(STATIC_DIR, final_video_filename)
     shutil.copy(video_path, static_video_path)
 
