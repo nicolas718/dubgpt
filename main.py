@@ -143,6 +143,10 @@ async def upload_video(
     static_video_path = os.path.join(STATIC_DIR, final_video_filename)
     shutil.copy(video_path, static_video_path)
 
+    # Log URLs for debugging
+    print("Serving video at:", f"https://dubgpt-backend.up.railway.app/static/{final_video_filename}")
+    print("Serving audio at:", f"https://dubgpt-backend.up.railway.app/static/{dubbed_audio_filename}")
+
     # Call Sync Labs
     try:
         sync_headers = {
