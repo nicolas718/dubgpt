@@ -1,6 +1,9 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse
+from starlette.staticfiles import StaticFiles
+from mimetypes import add_type
 import os
 import requests
 from moviepy.editor import VideoFileClip
@@ -13,9 +16,10 @@ load_dotenv()
 
 app = FastAPI()
 
-# Mount the /static folder to serve files
+# Mount the /static folder to serve files with correct MIME type
 STATIC_DIR = "static"
 os.makedirs(STATIC_DIR, exist_ok=True)
+add_type("video/mp4", ".mp4", strict=True)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
@@ -45,9 +49,9 @@ async def upload_video(
         video_path = original_path.rsplit(".", 1)[0] + ".mp4"
         try:
             subprocess.run([
-                "ffmpeg", "-i", original_path,
+                "ffmpeg", "-y", "-i", original_path,
                 "-vcodec", "libx264", "-acodec", "aac",
-                video_path
+                "-f", "mp4", video_path
             ], check=True)
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": f"Video conversion failed: {str(e)}"})
