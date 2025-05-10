@@ -20,6 +20,7 @@ app = FastAPI()
 STATIC_DIR = "static"
 os.makedirs(STATIC_DIR, exist_ok=True)
 add_type("video/mp4", ".mp4", strict=True)
+add_type("audio/mpeg", ".mp3", strict=True)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
@@ -172,4 +173,5 @@ async def upload_video(
         "original_video_url": f"https://dubgpt-backend.up.railway.app/static/{final_video_filename}",
         "sync_labs_url": sync_data.get("url")
     }
+
 
