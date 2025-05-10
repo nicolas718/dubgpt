@@ -1,32 +1,16 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
-from starlette.responses import FileResponse
-from mimetypes import add_type, init
 import os
 import requests
 from moviepy.editor import VideoFileClip
 from dotenv import load_dotenv
-import shutil
-import uuid
-import subprocess
 
 load_dotenv()
 
 app = FastAPI()
 
-# Mount the /static folder to serve files with correct MIME type
-STATIC_DIR = "static"
-os.makedirs(STATIC_DIR, exist_ok=True)
-init()
-add_type("video/mp4", ".mp4")
-add_type("audio/mpeg", ".mp3")
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY")
-SYNC_API_KEY = os.getenv("SYNC_API_KEY")
-SYNC_API_URL = "https://api.sync.so/v2/generate"
 
 @app.get("/")
 def read_root():
@@ -37,32 +21,15 @@ async def upload_video(
     file: UploadFile = File(...),
     target_language: str = Form(...)
 ):
-    session_id = str(uuid.uuid4())[:8]
-    file_basename = file.filename.rsplit(".", 1)[0]
-
-    # Save uploaded video to temp
-    original_path = f"/tmp/{session_id}_{file.filename}"
-    with open(original_path, "wb") as buffer:
+    # Save uploaded file
+    file_location = f"/tmp/{file.filename}"
+    with open(file_location, "wb") as buffer:
         buffer.write(await file.read())
 
-    # Convert to .mp4 if needed
-    if not original_path.endswith(".mp4"):
-        video_path = original_path.rsplit(".", 1)[0] + ".mp4"
-        try:
-            subprocess.run([
-                "ffmpeg", "-y", "-i", original_path,
-                "-vcodec", "libx264", "-acodec", "aac",
-                "-f", "mp4", video_path
-            ], check=True)
-        except Exception as e:
-            return JSONResponse(status_code=500, content={"error": f"Video conversion failed: {str(e)}"})
-    else:
-        video_path = original_path
-
     # Extract audio
-    audio_path = video_path.rsplit(".", 1)[0] + ".mp3"
+    audio_path = file_location.rsplit(".", 1)[0] + ".mp3"
     try:
-        video = VideoFileClip(video_path)
+        video = VideoFileClip(file_location)
         video.audio.write_audiofile(audio_path)
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Audio extraction failed: {str(e)}"})
@@ -115,7 +82,7 @@ async def upload_video(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Translation failed: {str(e)}"})
 
-    # Generate dubbed audio
+    # Generate dubbed audio using TTS
     try:
         tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
         headers = {
@@ -131,51 +98,18 @@ async def upload_video(
             }
         }
         tts_response = requests.post(tts_url, headers=headers, json=payload)
-        dubbed_audio_filename = f"{session_id}_{file_basename}_{target_language}.mp3"
-        dubbed_audio_path = os.path.join(STATIC_DIR, dubbed_audio_filename)
+        dubbed_audio_path = file_location.rsplit(".", 1)[0] + f"_{target_language}.mp3"
         with open(dubbed_audio_path, "wb") as out_file:
             out_file.write(tts_response.content)
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"TTS failed: {str(e)}"})
 
-    # Copy video to static folder
-    final_video_filename = f"{session_id}_{file_basename}.mp4"
-    static_video_path = os.path.join(STATIC_DIR, final_video_filename)
-    shutil.copy(video_path, static_video_path)
-
-    # Log URLs for debugging
-    print("Serving video at:", f"https://dubgpt-backend.up.railway.app/static/{final_video_filename}")
-    print("Serving audio at:", f"https://dubgpt-backend.up.railway.app/static/{dubbed_audio_filename}")
-
-    # Call Sync Labs
-    try:
-        sync_headers = {
-            "x-api-key": SYNC_API_KEY,
-            "Content-Type": "application/json"
-        }
-        sync_payload = {
-            "model": "lipsync-1.8.0",
-            "input": [
-                {"type": "video", "url": f"https://dubgpt-backend.up.railway.app/static/{final_video_filename}"},
-                {"type": "audio", "url": f"https://dubgpt-backend.up.railway.app/static/{dubbed_audio_filename}"}
-            ]
-        }
-        sync_response = requests.post(SYNC_API_URL, headers=sync_headers, json=sync_payload)
-        sync_data = sync_response.json()
-
-        if sync_response.status_code != 200:
-            return JSONResponse(status_code=500, content={"error": "Sync Labs failed", "details": sync_data})
-
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Sync Labs request failed: {str(e)}"})
-
     return {
-        "message": "Video dubbing and lip-sync complete.",
-        "translated_text": translated_text,
+        "message": "Transcription, voice cloning, translation, and dubbing complete",
+        "original_transcript": transcript_text,
+        "translated_transcript": translated_text,
         "voice_id": voice_id,
-        "dubbed_audio_url": f"https://dubgpt-backend.up.railway.app/static/{dubbed_audio_filename}",
-        "original_video_url": f"https://dubgpt-backend.up.railway.app/static/{final_video_filename}",
-        "sync_labs_url": sync_data.get("url")
+        "dubbed_audio_path": dubbed_audio_path
     }
 
 
