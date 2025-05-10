@@ -46,7 +46,7 @@ async def upload_video(
         try:
             subprocess.run([
                 "ffmpeg", "-i", original_path,
-                "-vcodec", "h264", "-acodec", "aac",
+                "-vcodec", "libx264", "-acodec", "aac",
                 video_path
             ], check=True)
         except Exception as e:
