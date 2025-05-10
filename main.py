@@ -2,8 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse
-from starlette.staticfiles import StaticFiles
-from mimetypes import add_type
+from mimetypes import add_type, init
 import os
 import requests
 from moviepy.editor import VideoFileClip
@@ -19,8 +18,9 @@ app = FastAPI()
 # Mount the /static folder to serve files with correct MIME type
 STATIC_DIR = "static"
 os.makedirs(STATIC_DIR, exist_ok=True)
-add_type("video/mp4", ".mp4", strict=True)
-add_type("audio/mpeg", ".mp3", strict=True)
+init()
+add_type("video/mp4", ".mp4")
+add_type("audio/mpeg", ".mp3")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
