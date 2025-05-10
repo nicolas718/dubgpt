@@ -2,10 +2,8 @@ from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 import os
 import requests
-import httpx
 from moviepy.editor import VideoFileClip
 from dotenv import load_dotenv
-import uuid
 
 load_dotenv()
 
@@ -13,19 +11,18 @@ app = FastAPI()
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY")
-WAV2LIP_VM_URL = "http://35.226.116.89:8000/lipsync"  # Your VM endpoint
 
 @app.get("/")
 def read_root():
-    return {"message": "DubGPT Railway backend is live."}
+    return {"message": "DubGPT backend is live."}
 
 @app.post("/upload")
 async def upload_video(
     file: UploadFile = File(...),
     target_language: str = Form(...)
 ):
-    session_id = str(uuid.uuid4())[:8]
-    file_location = f"/tmp/{session_id}_{file.filename}"
+    # Save uploaded file
+    file_location = f"/tmp/{file.filename}"
     with open(file_location, "wb") as buffer:
         buffer.write(await file.read())
 
@@ -107,29 +104,13 @@ async def upload_video(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"TTS failed: {str(e)}"})
 
-    # Send video + dubbed audio to Wav2Lip VM (async, correct)
-    try:
-        async with httpx.AsyncClient() as client:
-            with open(file_location, "rb") as video_file, open(dubbed_audio_path, "rb") as audio_file:
-                files = {
-                    "video": (file.filename, video_file, "video/mp4"),
-                    "audio": (f"dub_{target_language}.mp3", audio_file, "audio/mpeg")
-                }
-                response = await client.post(WAV2LIP_VM_URL, files=files)
+    return {
+        "message": "Transcription, voice cloning, translation, and dubbing complete",
+        "original_transcript": transcript_text,
+        "translated_transcript": translated_text,
+        "voice_id": voice_id,
+        "dubbed_audio_path": dubbed_audio_path
+    }
 
-        if response.status_code != 200:
-            return JSONResponse(status_code=500, content={"error": "Wav2Lip VM processing failed", "details": response.text})
-
-        result = response.json()
-        return {
-            "message": "All processing complete, including Wav2Lip.",
-            "original_transcript": transcript_text,
-            "translated_transcript": translated_text,
-            "voice_id": voice_id,
-            "download_url": result["download_url"]
-        }
-
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Sending to Wav2Lip VM failed: {str(e)}"})
 
 
