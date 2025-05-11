@@ -50,10 +50,14 @@ async def upload_video(
         if upload_io_response.status_code != 200:
             return JSONResponse(status_code=500, content={"error": "Upload.io failed", "details": upload_io_response.text})
 
-        uploaded_file_info = upload_io_response.json()
+        try:
+            uploaded_file_info = upload_io_response.json()
+        except Exception:
+            return JSONResponse(status_code=500, content={"error": "Upload.io returned invalid JSON", "raw": upload_io_response.text})
+
         video_url = uploaded_file_info.get("fileUrl")
         if not video_url:
-            return JSONResponse(status_code=500, content={"error": "Upload.io did not return a file URL."})
+            return JSONResponse(status_code=500, content={"error": "Upload.io did not return a file URL.", "full_response": uploaded_file_info})
 
         # Transcription
         try:
