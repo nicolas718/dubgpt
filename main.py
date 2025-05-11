@@ -55,8 +55,9 @@ async def upload_video(
         except Exception:
             return JSONResponse(status_code=500, content={"error": "Upload.io returned invalid JSON", "raw": upload_io_response.text})
 
-        video_url = uploaded_file_info.get("fileUrl")
-        if not video_url:
+        try:
+            video_url = uploaded_file_info["files"][0]["fileUrl"]
+        except Exception:
             return JSONResponse(status_code=500, content={"error": "Upload.io did not return a file URL.", "full_response": uploaded_file_info})
 
         # Transcription
@@ -119,7 +120,7 @@ async def upload_video(
             )
 
         audio_info = audio_upload_response.json()
-        audio_url = audio_info.get("fileUrl")
+        audio_url = audio_info["files"][0]["fileUrl"]
 
         # Send to Sync Labs
         sync_headers = {
