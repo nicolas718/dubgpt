@@ -137,15 +137,18 @@ async def upload_video(
         sync_response = requests.post(SYNC_API_URL, headers=sync_headers, json=sync_payload)
         sync_data = sync_response.json()
 
-        if sync_response.status_code != 200:
-            return JSONResponse(status_code=500, content={"error": "Sync Labs failed", "details": sync_data})
+        # Fetch status using ID
+        sync_id = sync_data.get("id")
+        status_url = f"https://api.sync.so/v2/generate/{sync_id}"
+        status_check = requests.get(status_url, headers={"x-api-key": SYNC_API_KEY})
+        status_data = status_check.json()
 
         return {
-            "message": "Dubbing and lip-sync complete.",
+            "message": "Dubbing and lip-sync request sent.",
             "translated_text": translated_text,
             "dubbed_audio_url": audio_url,
             "video_url": video_url,
-            "sync_labs_url": sync_data.get("outputUrl")
+            "sync_labs_status": status_data
         }
 
     except Exception as e:
