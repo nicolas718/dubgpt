@@ -26,12 +26,10 @@ async def upload_video(
     target_language: str = Form(...)
 ):
     try:
-        # Save uploaded file temporarily to extract audio
         file_location = f"/tmp/{file.filename}"
         with open(file_location, "wb") as buffer:
             buffer.write(await file.read())
 
-        # Extract audio
         audio_path = file_location.rsplit(".", 1)[0] + ".mp3"
         try:
             video = VideoFileClip(file_location)
@@ -39,7 +37,6 @@ async def upload_video(
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": f"Audio extraction failed: {str(e)}"})
 
-        # Upload video to Upload.io
         with open(file_location, "rb") as f:
             upload_io_response = requests.post(
                 UPLOAD_IO_URL,
@@ -60,7 +57,6 @@ async def upload_video(
         except Exception:
             return JSONResponse(status_code=500, content={"error": "Upload.io did not return a file URL.", "full_response": uploaded_file_info})
 
-        # Transcription
         try:
             with open(audio_path, "rb") as audio_file:
                 headers = {"xi-api-key": ELEVENLABS_API_KEY}
@@ -75,7 +71,6 @@ async def upload_video(
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": f"Transcription failed: {str(e)}"})
 
-        # Translate transcript
         try:
             translate_url = "https://translation.googleapis.com/language/translate/v2"
             translate_params = {
@@ -89,9 +84,26 @@ async def upload_video(
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": f"Translation failed: {str(e)}"})
 
-        # TTS with ElevenLabs (using default voice)
         try:
-            tts_url = "https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL"
+            with open(audio_path, "rb") as audio_file:
+                headers = {"xi-api-key": ELEVENLABS_API_KEY}
+                files = {"files": audio_file}
+                data = {"name": f"voice_clone_{file.filename}", "labels": "{}"}
+                voice_response = requests.post(
+                    "https://api.elevenlabs.io/v1/voices/add",
+                    headers=headers,
+                    data=data,
+                    files=files
+                )
+                voice_data = voice_response.json()
+                voice_id = voice_data.get("voice_id")
+                if not voice_id:
+                    return JSONResponse(status_code=500, content={"error": "Voice cloning failed", "details": voice_data})
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": f"Voice cloning failed: {str(e)}"})
+
+        try:
+            tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
             headers = {
                 "xi-api-key": ELEVENLABS_API_KEY,
                 "Content-Type": "application/json"
@@ -111,7 +123,6 @@ async def upload_video(
         except Exception as e:
             return JSONResponse(status_code=500, content={"error": f"TTS failed: {str(e)}"})
 
-        # Upload dubbed audio
         with open(dubbed_audio_path, "rb") as a:
             audio_upload_response = requests.post(
                 UPLOAD_IO_URL,
@@ -122,7 +133,6 @@ async def upload_video(
         audio_info = audio_upload_response.json()
         audio_url = audio_info["files"][0]["fileUrl"]
 
-        # Send to Sync Labs
         sync_headers = {
             "x-api-key": SYNC_API_KEY,
             "Content-Type": "application/json"
@@ -137,20 +147,27 @@ async def upload_video(
         sync_response = requests.post(SYNC_API_URL, headers=sync_headers, json=sync_payload)
         sync_data = sync_response.json()
 
-        # Fetch status using ID
         sync_id = sync_data.get("id")
-        status_url = f"https://api.sync.so/v2/generate/{sync_id}"
-        status_check = requests.get(status_url, headers={"x-api-key": SYNC_API_KEY})
-        status_data = status_check.json()
 
         return {
             "message": "Dubbing and lip-sync request sent.",
             "translated_text": translated_text,
             "dubbed_audio_url": audio_url,
             "video_url": video_url,
-            "sync_labs_status": status_data
+            "voice_id": voice_id,
+            "sync_id": sync_id
         }
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Unexpected error: {str(e)}"})
+
+@app.get("/status/{sync_id}")
+def check_sync_status(sync_id: str):
+    try:
+        status_url = f"https://api.sync.so/v2/generate/{sync_id}"
+        headers = {"x-api-key": SYNC_API_KEY}
+        response = requests.get(status_url, headers=headers)
+        return response.json()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Failed to fetch status: {str(e)}"})
 
