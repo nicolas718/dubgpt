@@ -138,7 +138,7 @@ async def upload_video(
             "Content-Type": "application/json"
         }
         sync_payload = {
-            "model": "lipsync-2",
+            "model": "lipsync-1.8.0",
             "input": [
                 {"type": "video", "url": video_url},
                 {"type": "audio", "url": audio_url}
