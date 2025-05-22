@@ -17,6 +17,7 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_DEFAULT_REGION = os.getenv("AWS_DEFAULT_REGION")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY")
+PLAYHT_USER_ID = os.getenv("PLAYHT_USER_ID")
 PLAYHT_API_KEY = os.getenv("PLAYHT_API_KEY")
 
 # S3 client
@@ -106,6 +107,7 @@ async def upload_video(
     try:
         playht_headers = {
             "Authorization": f"Bearer {PLAYHT_API_KEY}",
+            "X-User-Id": PLAYHT_USER_ID,
             "Content-Type": "application/json"
         }
         payload = {
@@ -156,5 +158,6 @@ async def upload_video(
         "dubbed_audio_s3_url": dubbed_audio_s3_url,
         "final_video_s3_url": final_video_s3_url
     }
+
 
 
