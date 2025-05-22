@@ -1,173 +1,160 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 import os
+import boto3
 import requests
-from moviepy.editor import VideoFileClip
+import time
+from moviepy.editor import VideoFileClip, AudioFileClip
 from dotenv import load_dotenv
 
 load_dotenv()
 
 app = FastAPI()
 
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+# Load environment variables
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_DEFAULT_REGION = os.getenv("AWS_DEFAULT_REGION")
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY")
-UPLOAD_IO_SECRET_KEY = os.getenv("UPLOAD_IO_SECRET_KEY")
-SYNC_API_KEY = os.getenv("SYNC_API_KEY")
-SYNC_API_URL = "https://api.sync.so/v2/generate"
-UPLOAD_IO_URL = "https://api.upload.io/v1/files/form_data"
+PLAYHT_API_KEY = os.getenv("PLAYHT_API_KEY")
+
+# S3 client
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    region_name=AWS_DEFAULT_REGION
+)
+
+def upload_to_s3(local_path, s3_key):
+    s3.upload_file(local_path, S3_BUCKET_NAME, s3_key)
+    url = f"https://{S3_BUCKET_NAME}.s3.{AWS_DEFAULT_REGION}.amazonaws.com/{s3_key}"
+    return url
 
 @app.get("/")
 def read_root():
-    return {"message": "DubGPT backend is live."}
+    return {"message": "Polydub backend is live."}
 
 @app.post("/upload")
 async def upload_video(
     file: UploadFile = File(...),
     target_language: str = Form(...)
 ):
+    # 1. Save uploaded video to /tmp
+    file_location = f"/tmp/{file.filename}"
+    with open(file_location, "wb") as buffer:
+        buffer.write(await file.read())
+
+    # 2. Extract audio as mp3
+    audio_path = file_location.rsplit(".", 1)[0] + ".mp3"
     try:
-        file_location = f"/tmp/{file.filename}"
-        with open(file_location, "wb") as buffer:
-            buffer.write(await file.read())
+        video = VideoFileClip(file_location)
+        video.audio.write_audiofile(audio_path)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Audio extraction failed: {str(e)}"})
 
-        audio_path = file_location.rsplit(".", 1)[0] + ".mp3"
-        try:
-            video = VideoFileClip(file_location)
-            video.audio.write_audiofile(audio_path)
-        except Exception as e:
-            return JSONResponse(status_code=500, content={"error": f"Audio extraction failed: {str(e)}"})
+    # 3. Upload audio to S3
+    audio_s3_key = f"uploads/{os.path.basename(audio_path)}"
+    audio_s3_url = upload_to_s3(audio_path, audio_s3_key)
 
-        with open(file_location, "rb") as f:
-            upload_io_response = requests.post(
-                UPLOAD_IO_URL,
-                headers={"Authorization": f"Bearer {UPLOAD_IO_SECRET_KEY}"},
-                files={"file": (file.filename, f, file.content_type)}
-            )
+    # 4. Start AWS Transcribe job
+    transcribe = boto3.client(
+        "transcribe",
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name=AWS_DEFAULT_REGION
+    )
+    job_name = f"polydub-job-{int(time.time())}"
+    media_format = "mp3"
+    transcribe.start_transcription_job(
+        TranscriptionJobName=job_name,
+        Media={"MediaFileUri": audio_s3_url},
+        MediaFormat=media_format,
+        LanguageCode="en-US"  # Change this if needed
+    )
 
-        if upload_io_response.status_code != 200:
-            return JSONResponse(status_code=500, content={"error": "Upload.io failed", "details": upload_io_response.text})
+    # 5. Poll for job completion
+    while True:
+        status = transcribe.get_transcription_job(TranscriptionJobName=job_name)
+        if status["TranscriptionJob"]["TranscriptionJobStatus"] in ["COMPLETED", "FAILED"]:
+            break
+        time.sleep(5)
 
-        try:
-            uploaded_file_info = upload_io_response.json()
-        except Exception:
-            return JSONResponse(status_code=500, content={"error": "Upload.io returned invalid JSON", "raw": upload_io_response.text})
+    if status["TranscriptionJob"]["TranscriptionJobStatus"] == "FAILED":
+        return JSONResponse(status_code=500, content={"error": "Transcription failed"})
 
-        try:
-            video_url = uploaded_file_info["files"][0]["fileUrl"]
-        except Exception:
-            return JSONResponse(status_code=500, content={"error": "Upload.io did not return a file URL.", "full_response": uploaded_file_info})
+    transcript_file_url = status["TranscriptionJob"]["Transcript"]["TranscriptFileUri"]
+    transcript_data = requests.get(transcript_file_url).json()
+    transcript_text = transcript_data["results"]["transcripts"][0]["transcript"]
 
-        try:
-            with open(audio_path, "rb") as audio_file:
-                headers = {"xi-api-key": ELEVENLABS_API_KEY}
-                response = requests.post(
-                    "https://api.elevenlabs.io/v1/speech-to-text",
-                    headers=headers,
-                    data={"model_id": "scribe_v1"},
-                    files={"file": audio_file}
-                )
-                transcript_data = response.json()
-                transcript_text = transcript_data.get("text", "")
-        except Exception as e:
-            return JSONResponse(status_code=500, content={"error": f"Transcription failed: {str(e)}"})
+    # 6. Translate text
+    try:
+        translate_url = "https://translation.googleapis.com/language/translate/v2"
+        translate_params = {
+            "q": transcript_text,
+            "target": target_language,
+            "format": "text",
+            "key": GOOGLE_TRANSLATE_API_KEY
+        }
+        translate_response = requests.post(translate_url, data=translate_params)
+        translated_text = translate_response.json()["data"]["translations"][0]["translatedText"]
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Translation failed: {str(e)}"})
 
-        try:
-            translate_url = "https://translation.googleapis.com/language/translate/v2"
-            translate_params = {
-                "q": transcript_text,
-                "target": target_language,
-                "format": "text",
-                "key": GOOGLE_TRANSLATE_API_KEY
-            }
-            translate_response = requests.post(translate_url, data=translate_params)
-            translated_text = translate_response.json()["data"]["translations"][0]["translatedText"]
-        except Exception as e:
-            return JSONResponse(status_code=500, content={"error": f"Translation failed: {str(e)}"})
-
-        try:
-            with open(audio_path, "rb") as audio_file:
-                headers = {"xi-api-key": ELEVENLABS_API_KEY}
-                files = {"files": audio_file}
-                data = {"name": f"voice_clone_{file.filename}", "labels": "{}"}
-                voice_response = requests.post(
-                    "https://api.elevenlabs.io/v1/voices/add",
-                    headers=headers,
-                    data=data,
-                    files=files
-                )
-                voice_data = voice_response.json()
-                voice_id = voice_data.get("voice_id")
-                if not voice_id:
-                    return JSONResponse(status_code=500, content={"error": "Voice cloning failed", "details": voice_data})
-        except Exception as e:
-            return JSONResponse(status_code=500, content={"error": f"Voice cloning failed: {str(e)}"})
-
-        try:
-            tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-            headers = {
-                "xi-api-key": ELEVENLABS_API_KEY,
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "text": translated_text,
-                "model_id": "eleven_multilingual_v2",
-                "voice_settings": {
-                    "stability": 0.5,
-                    "similarity_boost": 0.75
-                }
-            }
-            tts_response = requests.post(tts_url, headers=headers, json=payload)
-            dubbed_audio_path = file_location.rsplit(".", 1)[0] + f"_{target_language}.mp3"
-            with open(dubbed_audio_path, "wb") as out_file:
-                out_file.write(tts_response.content)
-        except Exception as e:
-            return JSONResponse(status_code=500, content={"error": f"TTS failed: {str(e)}"})
-
-        with open(dubbed_audio_path, "rb") as a:
-            audio_upload_response = requests.post(
-                UPLOAD_IO_URL,
-                headers={"Authorization": f"Bearer {UPLOAD_IO_SECRET_KEY}"},
-                files={"file": (os.path.basename(dubbed_audio_path), a, "audio/mpeg")}
-            )
-
-        audio_info = audio_upload_response.json()
-        audio_url = audio_info["files"][0]["fileUrl"]
-
-        sync_headers = {
-            "x-api-key": SYNC_API_KEY,
+    # 7. Generate dubbed audio with Play.ht
+    try:
+        playht_headers = {
+            "Authorization": f"Bearer {PLAYHT_API_KEY}",
             "Content-Type": "application/json"
         }
-        sync_payload = {
-            "model": "lipsync-1.8.0",
-            "input": [
-                {"type": "video", "url": video_url},
-                {"type": "audio", "url": audio_url}
-            ]
+        payload = {
+            "text": translated_text,
+            "voice": "en-US-1",  # Change this as needed for your Play.ht voice
+            "output_format": "mp3"
         }
-        sync_response = requests.post(SYNC_API_URL, headers=sync_headers, json=sync_payload)
-        sync_data = sync_response.json()
-
-        sync_id = sync_data.get("id")
-
-        return {
-            "message": "Dubbing and lip-sync request sent.",
-            "translated_text": translated_text,
-            "dubbed_audio_url": audio_url,
-            "video_url": video_url,
-            "voice_id": voice_id,
-            "sync_id": sync_id
-        }
-
+        playht_response = requests.post(
+            "https://api.play.ht/api/v2/tts",
+            headers=playht_headers,
+            json=payload
+        )
+        playht_data = playht_response.json()
+        tts_audio_url = playht_data.get("audioUrl")
+        if not tts_audio_url:
+            return JSONResponse(status_code=500, content={"error": "Play.ht TTS failed", "details": playht_data})
+        # Download the generated audio
+        dubbed_audio_path = file_location.rsplit(".", 1)[0] + f"_{target_language}_dub.mp3"
+        with requests.get(tts_audio_url, stream=True) as r:
+            with open(dubbed_audio_path, "wb") as out_file:
+                for chunk in r.iter_content(chunk_size=8192):
+                    out_file.write(chunk)
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Unexpected error: {str(e)}"})
+        return JSONResponse(status_code=500, content={"error": f"TTS failed: {str(e)}"})
 
-@app.get("/status/{sync_id}")
-def check_sync_status(sync_id: str):
+    # 8. Upload dubbed audio to S3
+    dubbed_audio_s3_key = f"dubbed/{os.path.basename(dubbed_audio_path)}"
+    dubbed_audio_s3_url = upload_to_s3(dubbed_audio_path, dubbed_audio_s3_key)
+
+    # 9. Merge dubbed audio and original video
     try:
-        status_url = f"https://api.sync.so/v2/generate/{sync_id}"
-        headers = {"x-api-key": SYNC_API_KEY}
-        response = requests.get(status_url, headers=headers)
-        return response.json()
+        output_video_path = file_location.rsplit(".", 1)[0] + f"_final_{target_language}.mp4"
+        original_video = VideoFileClip(file_location)
+        dubbed_audio = AudioFileClip(dubbed_audio_path)
+        final_video = original_video.set_audio(dubbed_audio)
+        final_video.write_videofile(output_video_path, codec="libx264", audio_codec="aac")
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Failed to fetch status: {str(e)}"})
+        return JSONResponse(status_code=500, content={"error": f"Final video merge failed: {str(e)}"})
+
+    # 10. Upload final video to S3
+    final_video_s3_key = f"final/{os.path.basename(output_video_path)}"
+    final_video_s3_url = upload_to_s3(output_video_path, final_video_s3_key)
+
+    return {
+        "message": "Pipeline complete: Transcription, translation, TTS, merge done.",
+        "original_transcript": transcript_text,
+        "translated_transcript": translated_text,
+        "dubbed_audio_s3_url": dubbed_audio_s3_url,
+        "final_video_s3_url": final_video_s3_url
+    }
+
 
