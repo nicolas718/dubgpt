@@ -5,3 +5,5 @@ moviepy==1.0.3
 requests
 python-dotenv
 imageio-ffmpeg
+boto3
+
