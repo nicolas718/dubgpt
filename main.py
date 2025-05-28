@@ -31,6 +31,7 @@ s3 = boto3.client(
 
 def upload_to_s3(local_path, s3_key):
     s3.upload_file(local_path, S3_BUCKET_NAME, s3_key)
+    return f"https://{S3_BUCKET_NAME}.s3.{AWS_DEFAULT_REGION}.amazonaws.com/{s3_key}"
 
 def generate_presigned_url(bucket, key, expiration=3600):
     return s3.generate_presigned_url(
@@ -145,5 +146,6 @@ async def upload_video(
         "dubbed_audio_s3_url": dubbed_audio_s3_url,
         "final_video_s3_url": final_video_s3_url
     }
+
 
 
