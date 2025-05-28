@@ -113,9 +113,12 @@ async def upload_video(
         with open(audio_path, "rb") as speaker_audio_file:
             speaker_audio = speaker_audio_file.read()
         
+        # Encode the audio data as base64
+        speaker_audio_base64 = base64.b64encode(speaker_audio).decode("utf-8")
+        
         input_data = {
             "text": translated_text,
-            "speaker": speaker_audio,
+            "speaker": f"data:audio/mpeg;base64,{speaker_audio_base64}",
             "language": target_language
         }
         
