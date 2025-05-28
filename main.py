@@ -30,8 +30,13 @@ s3 = boto3.client(
 
 def upload_to_s3(local_path, s3_key):
     s3.upload_file(local_path, S3_BUCKET_NAME, s3_key)
-    url = f"https://{S3_BUCKET_NAME}.s3.{AWS_DEFAULT_REGION}.amazonaws.com/{s3_key}"
-    return url
+
+def generate_presigned_url(bucket, key, expiration=3600):
+    return s3.generate_presigned_url(
+        ClientMethod='get_object',
+        Params={'Bucket': bucket, 'Key': key},
+        ExpiresIn=expiration
+    )
 
 @app.get("/")
 def read_root():
@@ -55,9 +60,10 @@ async def upload_video(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Audio extraction failed: {str(e)}"})
 
-    # 3. Upload audio to S3
+    # 3. Upload audio to S3 and generate presigned URL
     audio_s3_key = f"uploads/{os.path.basename(audio_path)}"
-    audio_s3_url = upload_to_s3(audio_path, audio_s3_key)
+    upload_to_s3(audio_path, audio_s3_key)
+    audio_s3_url = generate_presigned_url(S3_BUCKET_NAME, audio_s3_key)
 
     # 4. Start AWS Transcribe job
     transcribe = boto3.client(
@@ -145,3 +151,4 @@ async def upload_video(
         "dubbed_audio_s3_url": dubbed_audio_s3_url,
         "final_video_s3_url": final_video_s3_url
     }
+
