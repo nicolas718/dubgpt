@@ -107,14 +107,14 @@ async def upload_video(
     
     # 7. Generate dubbed audio with Replicate
     try:
+        model_name = "lucastaco/xtts-v2"
         input_data = {
             "text": translated_text,
             "speaker": audio_s3_url,
-            "language": target_language,
-            "cleanup_voice": True
+            "language": target_language
         }
         output = replicate.run(
-            "lucataco/xtts-v2",
+            model_name,
             input=input_data
         )
         
@@ -150,5 +150,4 @@ async def upload_video(
         "dubbed_audio_s3_url": dubbed_audio_s3_url,
         "final_video_s3_url": final_video_s3_url
     }
-
 
