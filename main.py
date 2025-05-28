@@ -122,7 +122,11 @@ async def upload_video(
             out_file.write(output.read())
     except Exception as e:
         traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": f"Replicate TTS failed: {str(e)}"})
+        print("[ERROR] Exception:", e)
+        return JSONResponse(status_code=500, content={
+            "error": f"Replicate TTS failed: {str(e)}",
+            "traceback": traceback.format_exc()
+        })
 
     dubbed_audio_s3_key = f"dubbed/{os.path.basename(dubbed_audio_path)}"
     dubbed_audio_s3_url = upload_to_s3(dubbed_audio_path, dubbed_audio_s3_key)
@@ -146,6 +150,5 @@ async def upload_video(
         "dubbed_audio_s3_url": dubbed_audio_s3_url,
         "final_video_s3_url": final_video_s3_url
     }
-
 
 
