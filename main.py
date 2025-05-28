@@ -12,23 +12,18 @@ import replicate
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from moviepy.editor import VideoFileClip, AudioFileClip
-from moviepy.audio.fx.speed import speed
-from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Configuration
-class Settings(BaseSettings):
-    google_translate_api_key: str
-    replicate_api_token: str
-    whisper_model: str = "openai/whisper:8099696689d249cf8b122d833c36ac3f75505c666a395ca40ef26f68e7d3d16e"
-    xtts_model: str = "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e"
-    max_file_size_mb: int = 500
-    audio_tolerance_seconds: float = 0.1
-    
-    class Config:
-        env_file = ".env"
+class Settings:
+    def __init__(self):
+        self.google_translate_api_key = os.getenv("GOOGLE_TRANSLATE_API_KEY")
+        self.replicate_api_token = os.getenv("REPLICATE_API_TOKEN")
+        self.whisper_model = os.getenv("WHISPER_MODEL", "openai/whisper:8099696689d249cf8b122d833c36ac3f75505c666a395ca40ef26f68e7d3d16e")
+        self.xtts_model = os.getenv("XTTS_MODEL", "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e")
+        self.max_file_size_mb = int(os.getenv("MAX_FILE_SIZE_MB", "500"))
 
 settings = Settings()
 
@@ -196,16 +191,14 @@ async def process_video(job_id: str, file_path: str, filename: str, target_langu
         # Update status: Merging video
         update_job_status(job_id, "merging_video", 80)
         
-        # Merge with speed adjustment if needed
+        # Merge with video
         try:
             output_filename = f"{os.path.splitext(filename)[0]}_dubbed_{target_language}.mp4"
             output_path = os.path.join(temp_dir, output_filename)
             
             dubbed_audio = AudioFileClip(dubbed_audio_path)
-            dubbed_duration = dubbed_audio.duration
             
             # Create final video
-            # Note: Audio duration might not match video duration exactly
             final_video = video.set_audio(dubbed_audio)
             final_video.write_videofile(
                 output_path, 
@@ -337,31 +330,4 @@ def download_video(job_id: str):
     if not status["result"] or not os.path.exists(status["result"]):
         raise HTTPException(status_code=404, detail="Output file not found")
     
-    # Clean up job status after successful download
-    def cleanup():
-        try:
-            temp_dir = os.path.dirname(status["result"])
-            if os.path.exists(temp_dir) and temp_dir.startswith(tempfile.gettempdir()):
-                shutil.rmtree(temp_dir)
-            del job_status[job_id]
-        except:
-            pass
-    
-    return FileResponse(
-        status["result"], 
-        media_type="video/mp4",
-        filename=os.path.basename(status["result"]),
-        background=BackgroundTasks([cleanup])
-    )
-
-# Health check endpoint
-@app.get("/health")
-def health_check():
-    return {
-        "status": "healthy",
-        "active_jobs": len([j for j in job_status.values() if j["status"] not in ["completed", "failed"]])
-    }
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Clean up job status after successful
