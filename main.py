@@ -1,4 +1,5 @@
 import os
+import json
 import uuid
 import shutil
 import tempfile
@@ -21,7 +22,7 @@ class Settings:
     def __init__(self):
         self.google_translate_api_key = os.getenv("GOOGLE_TRANSLATE_API_KEY")
         self.replicate_api_token = os.getenv("REPLICATE_API_TOKEN")
-        self.whisper_model = os.getenv("WHISPER_MODEL", "openai/whisper:8099696689d249cf8b122d833c36ac3f75505c666a395ca40ef26f68e7d3d16e")
+        self.whisper_model = os.getenv("WHISPER_MODEL", "openai/whisper:4d50797290df275329f202e48c76360b3f22b08d28c196cbc54600319435f8d2")
         self.xtts_model = os.getenv("XTTS_MODEL", "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e")
         self.max_file_size_mb = int(os.getenv("MAX_FILE_SIZE_MB", "500"))
 
@@ -127,15 +128,49 @@ async def process_video(job_id: str, file_path: str, filename: str, target_langu
                     input={"audio": audio_file}
                 )
             
-            if isinstance(output, dict) and "text" in output:
+            # Debug: Log the output type and content
+            print(f"Whisper output type: {type(output)}")
+            print(f"Whisper output: {output}")
+            
+            # Handle Whisper's output format
+            transcript_text = ""
+            
+            # According to docs, Whisper returns {"segments": [...]}
+            if isinstance(output, dict) and "segments" in output:
+                # Extract text from all segments
+                segments = output.get("segments", [])
+                transcript_text = " ".join([seg.get("text", "").strip() for seg in segments if seg.get("text")])
+            elif isinstance(output, dict) and "text" in output:
                 transcript_text = output["text"]
+            elif isinstance(output, dict) and "transcription" in output:
+                transcript_text = output["transcription"]
             elif isinstance(output, str):
-                transcript_text = output
+                # Sometimes the output might be a JSON string
+                try:
+                    import json
+                    parsed = json.loads(output)
+                    if isinstance(parsed, dict) and "segments" in parsed:
+                        segments = parsed.get("segments", [])
+                        transcript_text = " ".join([seg.get("text", "").strip() for seg in segments if seg.get("text")])
+                    else:
+                        transcript_text = output
+                except:
+                    transcript_text = output
             else:
-                raise ValueError("Invalid output format from Whisper")
+                # Fallback: convert to string
+                transcript_text = str(output)
+            
+            # Clean up the transcript
+            transcript_text = transcript_text.strip()
+            
+            if not transcript_text:
+                raise ValueError("Whisper returned empty transcription")
+            
+            print(f"Extracted transcript: {transcript_text[:100]}...")  # Log first 100 chars
                 
         except Exception as e:
-            raise DubbingError("transcription", str(e))
+            import traceback
+            raise DubbingError("transcription", f"{str(e)}\nTraceback: {traceback.format_exc()}")
         
         # Update status: Translating
         update_job_status(job_id, "translating", 40)
@@ -330,4 +365,31 @@ def download_video(job_id: str):
     if not status["result"] or not os.path.exists(status["result"]):
         raise HTTPException(status_code=404, detail="Output file not found")
     
-    # Clean up job status after successful
+    # Clean up job status after successful download
+    def cleanup():
+        try:
+            temp_dir = os.path.dirname(status["result"])
+            if os.path.exists(temp_dir) and temp_dir.startswith(tempfile.gettempdir()):
+                shutil.rmtree(temp_dir)
+            del job_status[job_id]
+        except:
+            pass
+    
+    return FileResponse(
+        status["result"], 
+        media_type="video/mp4",
+        filename=os.path.basename(status["result"]),
+        background=BackgroundTasks([cleanup])
+    )
+
+# Health check endpoint
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy",
+        "active_jobs": len([j for j in job_status.values() if j["status"] not in ["completed", "failed"]])
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
