@@ -5,6 +5,7 @@ import boto3
 import requests
 import time
 import replicate
+import traceback
 from moviepy.editor import VideoFileClip, AudioFileClip
 from dotenv import load_dotenv
 
@@ -47,12 +48,10 @@ async def upload_video(
     file: UploadFile = File(...),
     target_language: str = Form(...)
 ):
-    # 1. Save uploaded video to /tmp
     file_location = f"/tmp/{file.filename}"
     with open(file_location, "wb") as buffer:
         buffer.write(await file.read())
 
-    # 2. Extract audio as mp3
     audio_path = file_location.rsplit(".", 1)[0] + ".mp3"
     try:
         video = VideoFileClip(file_location)
@@ -60,12 +59,10 @@ async def upload_video(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Audio extraction failed: {str(e)}"})
 
-    # 3. Upload audio to S3 and generate presigned URL
     audio_s3_key = f"uploads/{os.path.basename(audio_path)}"
     upload_to_s3(audio_path, audio_s3_key)
     audio_s3_url = generate_presigned_url(S3_BUCKET_NAME, audio_s3_key)
 
-    # 4. Start AWS Transcribe job
     transcribe = boto3.client(
         "transcribe",
         aws_access_key_id=AWS_ACCESS_KEY_ID,
@@ -73,15 +70,13 @@ async def upload_video(
         region_name=AWS_DEFAULT_REGION
     )
     job_name = f"polydub-job-{int(time.time())}"
-    media_format = "mp3"
     transcribe.start_transcription_job(
         TranscriptionJobName=job_name,
         Media={"MediaFileUri": audio_s3_url},
-        MediaFormat=media_format,
+        MediaFormat="mp3",
         LanguageCode="en-US"
     )
 
-    # 5. Poll for job completion
     while True:
         status = transcribe.get_transcription_job(TranscriptionJobName=job_name)
         if status["TranscriptionJob"]["TranscriptionJobStatus"] in ["COMPLETED", "FAILED"]:
@@ -95,7 +90,6 @@ async def upload_video(
     transcript_data = requests.get(transcript_file_url).json()
     transcript_text = transcript_data["results"]["transcripts"][0]["transcript"]
 
-    # 6. Translate text
     try:
         translate_url = "https://translation.googleapis.com/language/translate/v2"
         translate_params = {
@@ -109,7 +103,9 @@ async def upload_video(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Translation failed: {str(e)}"})
 
-    # 7. Generate dubbed audio with Replicate
+    print("[DEBUG] Translated text:", translated_text)
+    print("[DEBUG] Presigned S3 URL:", audio_s3_url)
+
     try:
         input = {
             "text": translated_text,
@@ -124,13 +120,12 @@ async def upload_video(
         with open(dubbed_audio_path, "wb") as out_file:
             out_file.write(output.read())
     except Exception as e:
+        traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": f"Replicate TTS failed: {str(e)}"})
 
-    # 8. Upload dubbed audio to S3
     dubbed_audio_s3_key = f"dubbed/{os.path.basename(dubbed_audio_path)}"
     dubbed_audio_s3_url = upload_to_s3(dubbed_audio_path, dubbed_audio_s3_key)
 
-    # 9. Merge dubbed audio and original video
     try:
         output_video_path = file_location.rsplit(".", 1)[0] + f"_final_{target_language}.mp4"
         original_video = VideoFileClip(file_location)
@@ -140,7 +135,6 @@ async def upload_video(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Final video merge failed: {str(e)}"})
 
-    # 10. Upload final video to S3
     final_video_s3_key = f"final/{os.path.basename(output_video_path)}"
     final_video_s3_url = upload_to_s3(output_video_path, final_video_s3_key)
 
@@ -151,4 +145,5 @@ async def upload_video(
         "dubbed_audio_s3_url": dubbed_audio_s3_url,
         "final_video_s3_url": final_video_s3_url
     }
+
 
