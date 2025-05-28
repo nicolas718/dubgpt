@@ -109,8 +109,8 @@ async def upload_video(
     try:
         model_version = "684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e"
         
-        # Use a local audio file for testing
-        speaker_audio_path = "path/to/your/local/audio/file.mp3"
+        # Use the extracted audio file as the speaker's voice
+        speaker_audio_path = audio_path
         with open(speaker_audio_path, "rb") as speaker_audio_file:
             speaker_audio = speaker_audio_file.read()
         
