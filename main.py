@@ -107,21 +107,22 @@ async def upload_video(
     
     # 7. Generate dubbed audio with Replicate
     try:
-        model_name = "lucastaco/xtts-v2"
+        model_version = "684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e"
         input_data = {
             "text": translated_text,
             "speaker": audio_s3_url,
             "language": target_language
         }
+        
         output = replicate.run(
-            model_name,
+            f"lucataco/xtts-v2:{model_version}",
             input=input_data
         )
         
         # Download the generated audio
         dubbed_audio_path = file_location.rsplit(".", 1)[0] + f"_{target_language}_dub.wav"
         with open(dubbed_audio_path, "wb") as out_file:
-            out_file.write(requests.get(output).content)
+            out_file.write(output)
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"TTS failed: {str(e)}"})
     
@@ -150,4 +151,3 @@ async def upload_video(
         "dubbed_audio_s3_url": dubbed_audio_s3_url,
         "final_video_s3_url": final_video_s3_url
     }
-
