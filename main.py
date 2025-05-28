@@ -37,12 +37,12 @@ async def upload_video(
 
     # Transcribe with Replicate Whisper
     try:
-        with open(audio_path, "rb") as audio_file:
+        with open(audio_path, "rb") as file:
             output = replicate.run(
                 "openai/whisper:8099696689d249cf8b122d833c36ac3f75505c666a395ca40ef26f68e7d3d16e",
-                input={"audio": audio_file}
+                input={"audio": file}
             )
-        transcript_text = output["text"] if isinstance(output, dict) and "text" in output else output
+            transcript_text = output["transcription"]
     except Exception as e:
         tb_str = traceback.format_exc()
         return JSONResponse(status_code=500, content={
@@ -68,18 +68,21 @@ async def upload_video(
 
     # TTS with Replicate XTTS-v2
     try:
-        with open(audio_path, "rb") as speaker_audio:
-            tts_input = {
+        with open(audio_path, "rb") as speaker_file:
+            input = {
                 "text": translated_text,
-                "speaker": speaker_audio,
+                "speaker": speaker_file,
                 "language": target_language
             }
             output = replicate.run(
                 "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e",
-                input=tts_input
+                input=input
             )
 
-        if isinstance(output, list) and len(output) > 0 and isinstance(output[0], str):
+        print("[DEBUG] Replicate XTTS Output:", output)
+
+        # Accept string or list format
+        if isinstance(output, list) and len(output) > 0:
             audio_url = output[0]
         elif isinstance(output, str):
             audio_url = output
@@ -118,6 +121,7 @@ async def upload_video(
         "dubbed_audio_path": dubbed_audio_path,
         "final_video_path": output_video_path
     }
+
 
 
 
