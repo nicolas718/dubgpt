@@ -116,9 +116,19 @@ async def upload_video(
             "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e",
             input=input
         )
+
+        if isinstance(output, list) and len(output) > 0:
+            audio_url = output[0]
+        else:
+            raise ValueError("Invalid output format from replicate.run")
+
         dubbed_audio_path = file_location.rsplit(".", 1)[0] + f"_{target_language}_dub.wav"
-        with open(dubbed_audio_path, "wb") as out_file:
-            out_file.write(output.read())
+        with requests.get(audio_url, stream=True) as r:
+            r.raise_for_status()
+            with open(dubbed_audio_path, "wb") as out_file:
+                for chunk in r.iter_content(chunk_size=8192):
+                    out_file.write(chunk)
+
     except Exception as e:
         tb_str = traceback.format_exc()
         print("[EXCEPTION TYPE]", type(e))
@@ -152,6 +162,7 @@ async def upload_video(
         "dubbed_audio_s3_url": dubbed_url,
         "final_video_s3_url": final_url
     }
+
 
 
 
