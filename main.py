@@ -108,9 +108,15 @@ async def upload_video(
     # 7. Generate dubbed audio with Replicate
     try:
         model_version = "684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e"
+        
+        # Use a local audio file for testing
+        speaker_audio_path = "path/to/your/local/audio/file.mp3"
+        with open(speaker_audio_path, "rb") as speaker_audio_file:
+            speaker_audio = speaker_audio_file.read()
+        
         input_data = {
             "text": translated_text,
-            "speaker": audio_s3_url,
+            "speaker": speaker_audio,
             "language": target_language
         }
         
