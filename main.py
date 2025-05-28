@@ -3,7 +3,7 @@ import requests
 import replicate
 import traceback
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from moviepy.editor import VideoFileClip, AudioFileClip
 from dotenv import load_dotenv
 
@@ -37,11 +37,18 @@ async def upload_video(
     # Transcribe with Replicate Whisper
     try:
         with open(audio_path, "rb") as audio_file:
-            transcription = replicate.run(
+            output = replicate.run(
                 "openai/whisper:8099696689d249cf8b122d833c36ac3f75505c666a395ca40ef26f68e7d3d16e",
                 input={"audio": audio_file}
             )
-        transcript_text = transcription["text"] if isinstance(transcription, dict) else transcription
+
+        if isinstance(output, dict) and "text" in output:
+            transcript_text = output["text"]
+        elif isinstance(output, str):
+            transcript_text = output
+        else:
+            raise ValueError("Invalid output format from replicate Whisper")
+
     except Exception as e:
         tb_str = traceback.format_exc()
         return JSONResponse(status_code=500, content={
@@ -67,18 +74,20 @@ async def upload_video(
 
     # TTS with Replicate XTTS-v2
     try:
-        with open(audio_path, "rb") as speaker_audio:
+        with open(audio_path, "rb") as audio_file:
+            input = {
+                "text": translated_text,
+                "speaker": audio_file,
+                "language": target_language
+            }
             output = replicate.run(
-                "lucataco/xtts-v2",
-                input={
-                    "text": translated_text,
-                    "speaker": speaker_audio,
-                    "language": target_language
-                }
+                "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e",
+                input=input
             )
+
         if isinstance(output, str):
             audio_url = output
-        elif isinstance(output, list) and len(output) > 0 and isinstance(output[0], str):
+        elif isinstance(output, list) and len(output) > 0:
             audio_url = output[0]
         else:
             raise ValueError("Invalid output format from replicate.run")
@@ -108,12 +117,7 @@ async def upload_video(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Final video merge failed: {str(e)}"})
 
-    return FileResponse(
-        path=output_video_path,
-        filename=os.path.basename(output_video_path),
-        media_type="video/mp4"
-    )
-
+    return FileResponse(output_video_path, media_type="video/mp4", filename=os.path.basename(output_video_path))
 
 
 
