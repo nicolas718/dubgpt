@@ -37,10 +37,10 @@ async def upload_video(
 
     # Transcribe with Replicate Whisper
     try:
-        with open(audio_path, "rb") as file:
+        with open(audio_path, "rb") as audio_file:
             output = replicate.run(
-                "openai/whisper:2023-03-13",
-                input={"audio": file}
+                "openai/whisper:8099696689d249cf8b122d833c36ac3f75505c666a395ca40ef26f68e7d3d16e",
+                input={"audio": audio_file}
             )
             transcript_text = output["transcription"]
     except Exception as e:
