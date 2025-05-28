@@ -2,7 +2,6 @@ fastapi
 uvicorn
 python-multipart
 moviepy==1.0.3
-boto3
 requests
 python-dotenv
 imageio-ffmpeg
