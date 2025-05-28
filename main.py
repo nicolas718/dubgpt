@@ -12,8 +12,8 @@ import replicate
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from moviepy.editor import VideoFileClip, AudioFileClip
-from moviepy.audio.fx.all import speedx
-from pydantic import BaseSettings
+from moviepy.audio.fx.speed import speed
+from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -204,12 +204,8 @@ async def process_video(job_id: str, file_path: str, filename: str, target_langu
             dubbed_audio = AudioFileClip(dubbed_audio_path)
             dubbed_duration = dubbed_audio.duration
             
-            # Adjust audio speed if duration mismatch is significant
-            if abs(original_duration - dubbed_duration) > settings.audio_tolerance_seconds:
-                speed_factor = dubbed_duration / original_duration
-                dubbed_audio = speedx(dubbed_audio, factor=speed_factor)
-            
             # Create final video
+            # Note: Audio duration might not match video duration exactly
             final_video = video.set_audio(dubbed_audio)
             final_video.write_videofile(
                 output_path, 
@@ -369,6 +365,3 @@ def health_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
-
