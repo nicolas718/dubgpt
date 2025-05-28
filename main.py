@@ -10,17 +10,7 @@ from fastapi.responses import JSONResponse
 from moviepy.editor import VideoFileClip, AudioFileClip
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
-
-# Print full traceback for any uncaught exceptions
-def handle_exception(exc_type, exc_value, exc_traceback):
-    if issubclass(exc_type, KeyboardInterrupt):
-        sys.__excepthook__(exc_type, exc_value, exc_traceback)
-        return
-    print("[UNHANDLED EXCEPTION]", ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
-
-sys.excepthook = handle_exception
 
 app = FastAPI()
 
@@ -131,8 +121,9 @@ async def upload_video(
             out_file.write(output.read())
     except Exception as e:
         tb_str = traceback.format_exc()
-        print("[ERROR] Exception:", str(e))
-        print("[ERROR] Traceback:", tb_str)
+        print("[EXCEPTION TYPE]", type(e))
+        print("[EXCEPTION]", str(e))
+        print("[TRACEBACK]\n", tb_str)
         return JSONResponse(status_code=500, content={
             "error": "Replicate TTS failed",
             "exception": str(e),
@@ -161,5 +152,6 @@ async def upload_video(
         "dubbed_audio_s3_url": dubbed_url,
         "final_video_s3_url": final_url
     }
+
 
 
