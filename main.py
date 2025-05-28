@@ -4,7 +4,7 @@ import requests
 import replicate
 import traceback
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from moviepy.editor import VideoFileClip, AudioFileClip
 from dotenv import load_dotenv
 
@@ -37,12 +37,11 @@ async def upload_video(
 
     # Transcribe with Replicate Whisper
     try:
-        with open(audio_path, "rb") as file:
-            output = replicate.run(
-                "openai/whisper:8099696689d249cf8b122d833c36ac3f75505c666a395ca40ef26f68e7d3d16e",
-                input={"audio": file}
-            )
-            transcript_text = output["transcription"]
+        output = replicate.run(
+            "openai/whisper:8099696689d249cf8b122d833c36ac3f75505c666a395ca40ef26f68e7d3d16e",
+            input={"audio": open(audio_path, "rb")}
+        )
+        transcript_text = output["transcription"] if isinstance(output, dict) else output
     except Exception as e:
         tb_str = traceback.format_exc()
         return JSONResponse(status_code=500, content={
@@ -68,20 +67,18 @@ async def upload_video(
 
     # TTS with Replicate XTTS-v2
     try:
-        with open(audio_path, "rb") as speaker_file:
-            input = {
-                "text": translated_text,
-                "speaker": speaker_file,
-                "language": target_language
-            }
-            output = replicate.run(
-                "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e",
-                input=input
-            )
+        input = {
+            "text": translated_text,
+            "speaker": open(audio_path, "rb"),
+            "language": target_language
+        }
+        output = replicate.run(
+            "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e",
+            input=input
+        )
 
-        print("[DEBUG] Replicate XTTS Output:", output)
+        print("[DEBUG] XTTS Output:", output)
 
-        # Accept string or list format
         if isinstance(output, list) and len(output) > 0:
             audio_url = output[0]
         elif isinstance(output, str):
@@ -114,13 +111,12 @@ async def upload_video(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Final video merge failed: {str(e)}"})
 
-    return {
-        "message": "Pipeline complete: Transcription, translation, TTS, merge done.",
-        "original_transcript": transcript_text,
-        "translated_transcript": translated_text,
-        "dubbed_audio_path": dubbed_audio_path,
-        "final_video_path": output_video_path
-    }
+    return FileResponse(
+        path=output_video_path,
+        filename=output_video_path.split("/")[-1],
+        media_type="video/mp4"
+    )
+
 
 
 
