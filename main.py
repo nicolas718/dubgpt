@@ -163,4 +163,3 @@ except Exception as e:
         "dubbed_audio_s3_url": dubbed_audio_s3_url,
         "final_video_s3_url": final_video_s3_url
     }
-    }
