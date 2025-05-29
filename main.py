@@ -1,4 +1,33 @@
-import os
+async def smart_translate_segment(segment: TimedSegment, target_language: str, context: str = "") -> str:
+    """Use GPT-4o to translate with timing constraints"""
+    
+    # Calculate speaking rate constraints
+    word_count = len(segment.text.split())
+    chars_per_second = len(segment.text) / segment.duration if segment.duration > 0 else 30
+    
+    # Estimate target language expansion factor
+    expansion_factors = {
+        "es": 1.25, "fr": 1.30, "de": 1.20, "it": 1.20,
+        "pt": 1.25, "ru": 0.90, "ja": 0.70, "ko": 0.75,
+        "zh": 0.50, "ar": 1.10, "hi": 1.15
+    }
+    
+    expansion = expansion_factors.get(target_language, 1.2)
+    
+    # Allow for some speed adjustment but not too extreme (max 1.3x speed)
+    max_speed_factor = 1.3
+    adjusted_duration = segment.duration * max_speed_factor
+    max_chars = int(len(segment.text) * adjusted_duration / segment.duration / expansion)
+    
+    prompt = f"""Translate this text to {LANGUAGE_NAMES.get(target_language, target_language)}.
+
+Original text: "{segment.text}"
+Duration available: {segment.duration:.1f} seconds
+Maximum characters: {max_chars}
+Maximum speaking speed: {max_speed_factor}x normal
+
+Requirements:
+1. Create a natural translation that can be spoken comimport os
 import json
 import uuid
 import shutil
@@ -145,8 +174,8 @@ def extract_word_timings_from_whisperx(whisperx_output: dict) -> List[TimedSegme
     print(f"Total segments extracted: {len(segments)}")
     return segments
 
-def group_words_into_dubbing_segments(segments: List[TimedSegment], target_duration: float = 5.0) -> List[TimedSegment]:
-    """Group words into optimal segments for dubbing - longer segments for better flow"""
+def group_words_into_dubbing_segments(segments: List[TimedSegment], target_duration: float = 4.0) -> List[TimedSegment]:
+    """Group words into optimal segments for dubbing - respecting natural speech patterns"""
     dubbing_segments = []
     
     # First, combine all words from all segments
@@ -164,13 +193,12 @@ def group_words_into_dubbing_segments(segments: List[TimedSegment], target_durat
             all_words.append(word)
     
     if not all_words:
-        # Fallback: use original segments
         return segments
     
     # Sort words by start time
     all_words.sort(key=lambda w: w.start)
     
-    # Group words into longer segments (5-7 seconds or natural breaks)
+    # Group words into segments based on natural breaks and timing
     current_words = []
     current_start = None
     
@@ -181,23 +209,55 @@ def group_words_into_dubbing_segments(segments: List[TimedSegment], target_durat
         current_words.append(word)
         duration = word.end - current_start
         
-        # Check if we should create a segment
+        # Determine if we should create a segment
         should_segment = False
+        reason = ""
         
-        # Natural break points (strong punctuation)
-        if word.word.rstrip().endswith(('.', '!', '?')):
-            # Only segment if we have enough content (at least 2 seconds)
-            if duration >= 2.0:
-                should_segment = True
-        # Maximum duration reached
-        elif duration >= target_duration:
+        # Check for natural break points
+        word_text = word.word.strip()
+        
+        # Strong punctuation - always break if we have enough content
+        if word_text.endswith(('.', '!', '?')) and duration >= 1.5:
             should_segment = True
+            reason = "sentence_end"
+        
+        # Comma or semicolon - break if segment is getting long
+        elif word_text.endswith((',', ';', ':')) and duration >= 3.0:
+            should_segment = True
+            reason = "clause_end"
+        
+        # Maximum duration reached - try to find a good break point
+        elif duration >= target_duration:
+            # Look ahead for the next good break point (up to 1 second)
+            if i < len(all_words) - 1:
+                for j in range(i + 1, min(i + 5, len(all_words))):
+                    future_word = all_words[j]
+                    future_duration = future_word.end - current_start
+                    if future_duration > target_duration + 1.0:
+                        break
+                    if future_word.word.strip().endswith(('.', '!', '?', ',', ';', ':')):
+                        # Found a better break point nearby
+                        should_segment = False
+                        break
+                else:
+                    should_segment = True
+                    reason = "max_duration"
+            else:
+                should_segment = True
+                reason = "max_duration"
+        
+        # Long pause after word (>0.4s) and we have reasonable content
+        elif i < len(all_words) - 1:
+            next_word = all_words[i + 1]
+            pause_duration = next_word.start - word.end
+            if pause_duration > 0.4 and duration >= 1.5:
+                should_segment = True
+                reason = "natural_pause"
+        
         # Last word
         elif i == len(all_words) - 1:
             should_segment = True
-        # Very long pause after word (>0.5s) and we have enough content
-        elif i < len(all_words) - 1 and all_words[i + 1].start - word.end > 0.5 and duration >= 2.0:
-            should_segment = True
+            reason = "last_word"
         
         if should_segment and current_words:
             text = ' '.join([w.word for w in current_words])
@@ -209,24 +269,22 @@ def group_words_into_dubbing_segments(segments: List[TimedSegment], target_durat
                 words=current_words.copy()
             )
             dubbing_segments.append(dubbing_segment)
+            
+            if reason:
+                print(f"Segment break ({reason}): {dubbing_segment.duration:.1f}s - '{text[:40]}...'")
+            
             current_words = []
             current_start = None
     
-    # Handle any remaining words
-    if current_words:
-        text = ' '.join([w.word for w in current_words])
-        dubbing_segment = TimedSegment(
-            text=text.strip(),
-            start_time=current_start,
-            end_time=current_words[-1].end,
-            duration=current_words[-1].end - current_start,
-            words=current_words
-        )
-        dubbing_segments.append(dubbing_segment)
-    
     print(f"Created {len(dubbing_segments)} dubbing segments from {len(all_words)} words")
-    for i, seg in enumerate(dubbing_segments):
-        print(f"Segment {i}: '{seg.text[:50]}...' ({seg.duration:.1f}s)")
+    
+    # Analyze segment distribution
+    durations = [seg.duration for seg in dubbing_segments]
+    if durations:
+        avg_duration = sum(durations) / len(durations)
+        min_duration = min(durations)
+        max_duration = max(durations)
+        print(f"Segment durations: avg={avg_duration:.1f}s, min={min_duration:.1f}s, max={max_duration:.1f}s")
     
     return dubbing_segments
 
@@ -245,24 +303,33 @@ async def smart_translate_segment(segment: TimedSegment, target_language: str, c
     }
     
     expansion = expansion_factors.get(target_language, 1.2)
-    max_chars = int(len(segment.text) / expansion)
+    
+    # Limit speed adjustment to natural range (0.9x to 1.2x)
+    max_speed_factor = 1.2
+    min_speed_factor = 0.9
+    
+    # Calculate realistic character limit
+    natural_chars = int(len(segment.text) / expansion)
+    max_chars = int(natural_chars * max_speed_factor)
+    min_chars = int(natural_chars * min_speed_factor)
     
     prompt = f"""Translate this text to {LANGUAGE_NAMES.get(target_language, target_language)}.
 
 Original text: "{segment.text}"
 Duration available: {segment.duration:.1f} seconds
-Maximum characters: {max_chars}
+Target character count: {natural_chars} characters (range: {min_chars}-{max_chars})
 
-Requirements:
-1. Keep the translation concise to fit the time constraint
-2. Preserve the exact meaning and key information
-3. Use natural, conversational language
-4. If needed, use shorter synonyms or remove filler words
-5. The translation must be speakable in {segment.duration:.1f} seconds
+CRITICAL Requirements:
+1. Translation must sound NATURAL when spoken at normal speed
+2. Aim for {natural_chars} characters to avoid speed adjustment
+3. Use contractions and shorter phrases if needed
+4. Remove filler words if necessary
+5. NEVER sacrifice meaning for brevity
+6. If impossible to fit naturally, prefer slight speed-up over cut content
 
-Context from previous segments: {context[-200:] if context else 'Start of video'}
+Context: {context[-200:] if context else 'Start of video'}
 
-Return ONLY the translated text, no explanations."""
+Return ONLY the translated text."""
 
     try:
         output = replicate.run(
@@ -271,33 +338,19 @@ Return ONLY the translated text, no explanations."""
                 "prompt": prompt,
                 "max_tokens": 150,
                 "temperature": 0.3,
-                "system_prompt": "You are a professional translator specializing in video dubbing. Always provide concise, accurate translations that fit within time constraints."
+                "system_prompt": "You are a professional translator specializing in video dubbing. Create translations that sound natural when spoken, matching the original timing as closely as possible."
             }
         )
         
-        # GPT-4o returns streaming output, join it
         translated_text = ''.join(output).strip()
         
-        # Validate length
-        if len(translated_text) > max_chars * 1.5:
-            # Too long, ask for a shorter version
-            retry_prompt = f"Make this {LANGUAGE_NAMES.get(target_language, target_language)} text shorter (max {max_chars} characters): {translated_text}"
-            
-            output = replicate.run(
-                settings.gpt4o_model,
-                input={
-                    "prompt": retry_prompt,
-                    "max_tokens": 100,
-                    "temperature": 0.3
-                }
-            )
-            translated_text = ''.join(output).strip()
+        # Log translation for debugging
+        print(f"Segment ({segment.duration:.1f}s): '{segment.text[:30]}...' -> '{translated_text[:30]}...' ({len(translated_text)} chars)")
         
         return translated_text
         
     except Exception as e:
         print(f"GPT-4o translation failed: {e}, using fallback")
-        # Fallback: simple truncation
         return segment.text[:max_chars]
 
 async def generate_dubbed_segment(
@@ -341,43 +394,54 @@ async def generate_dubbed_segment(
         actual_duration = audio_clip.duration
         audio_clip.close()
         
+        # Limit speed adjustment to natural range
+        MAX_SPEED = 1.25  # No more than 25% faster
+        MIN_SPEED = 0.85  # No more than 15% slower
+        
         if abs(actual_duration - segment.duration) > 0.05:  # 50ms tolerance
             speed_factor = actual_duration / segment.duration
+            
+            # Log extreme speed adjustments
+            if speed_factor > MAX_SPEED or speed_factor < MIN_SPEED:
+                print(f"WARNING: Segment requires {speed_factor:.2f}x speed adjustment")
+                print(f"  Original: '{segment.text[:50]}...' ({segment.duration:.1f}s)")
+                print(f"  Translation: '{translated_text[:50]}...' ({actual_duration:.1f}s)")
+            
+            # Clamp speed factor to acceptable range
+            speed_factor = max(MIN_SPEED, min(MAX_SPEED, speed_factor))
             
             # Check if ffmpeg is available
             try:
                 result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
                 if result.returncode == 0:
                     # Use FFmpeg for speed adjustment
-                    if 0.5 <= speed_factor <= 2.0:
-                        cmd = [
-                            'ffmpeg', '-i', temp_output,
-                            '-filter:a', f'atempo={speed_factor}',
-                            '-y', output_path
-                        ]
-                    else:
-                        # Chain multiple atempo filters for extreme adjustments
-                        atempos = []
-                        remaining = speed_factor
-                        while remaining > 2.0:
-                            atempos.append('atempo=2.0')
-                            remaining /= 2.0
-                        while remaining < 0.5:
-                            atempos.append('atempo=0.5')
-                            remaining *= 2.0
-                        if abs(remaining - 1.0) > 0.01:
-                            atempos.append(f'atempo={remaining}')
-                        
-                        filter_chain = ','.join(atempos) if atempos else 'anull'
-                        cmd = [
-                            'ffmpeg', '-i', temp_output,
-                            '-filter:a', filter_chain,
-                            '-y', output_path
-                        ]
+                    cmd = [
+                        'ffmpeg', '-i', temp_output,
+                        '-filter:a', f'atempo={speed_factor}',
+                        '-y', output_path
+                    ]
                     
                     result = subprocess.run(cmd, capture_output=True, text=True)
                     if result.returncode == 0:
                         os.remove(temp_output)
+                        
+                        # Verify the adjusted duration
+                        adjusted_clip = AudioFileClip(output_path)
+                        final_duration = adjusted_clip.duration
+                        adjusted_clip.close()
+                        
+                        # If still too long/short after max adjustment, trim/pad
+                        if final_duration > segment.duration + 0.1:
+                            print(f"  Trimming audio from {final_duration:.1f}s to {segment.duration:.1f}s")
+                            # Trim the audio
+                            cmd = [
+                                'ffmpeg', '-i', output_path,
+                                '-t', str(segment.duration),
+                                '-y', output_path + '_trimmed.wav'
+                            ]
+                            subprocess.run(cmd, capture_output=True)
+                            os.remove(output_path)
+                            os.rename(output_path + '_trimmed.wav', output_path)
                     else:
                         print(f"FFmpeg adjustment failed: {result.stderr}")
                         shutil.move(temp_output, output_path)
