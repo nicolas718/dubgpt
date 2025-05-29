@@ -440,9 +440,35 @@ async def process_video_with_perfect_sync(
         # Create perfectly synchronized final audio
         update_job_status(job_id, "creating_synchronized_audio", 90)
         
-        # Create composite audio with all segments at exact positions
-        final_audio = CompositeAudioClip(audio_segments)
-        final_audio = final_audio.set_duration(original_duration)
+        # Method 1: Try concatenating with silence gaps
+        final_segments = []
+        last_end = 0
+        
+        for audio_seg in audio_segments:
+            # Add silence before segment if needed
+            if audio_seg.start > last_end:
+                silence_duration = audio_seg.start - last_end
+                silence = AudioFileClip(lambda t: 0, duration=silence_duration, fps=44100)
+                final_segments.append(silence)
+            
+            # Reset the start time to create a continuous clip
+            segment_duration = audio_seg.duration
+            continuous_seg = audio_seg.set_start(0)
+            final_segments.append(continuous_seg)
+            
+            last_end = audio_seg.start + segment_duration
+        
+        # Add final silence if needed
+        if last_end < original_duration:
+            final_silence = AudioFileClip(lambda t: 0, duration=original_duration - last_end, fps=44100)
+            final_segments.append(final_silence)
+        
+        # Concatenate all segments
+        if len(final_segments) > 0:
+            final_audio = concatenate_audioclips(final_segments)
+        else:
+            # Fallback: create silent audio
+            final_audio = AudioFileClip(lambda t: 0, duration=original_duration, fps=44100)
         
         # Save final audio
         temp_final_audio = os.path.join(temp_dir, "final_dubbed_audio.wav")
