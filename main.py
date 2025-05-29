@@ -344,38 +344,48 @@ async def generate_dubbed_segment(
         if abs(actual_duration - segment.duration) > 0.05:  # 50ms tolerance
             speed_factor = actual_duration / segment.duration
             
-            # Use FFmpeg for speed adjustment
-            if 0.5 <= speed_factor <= 2.0:
-                cmd = [
-                    'ffmpeg', '-i', temp_output,
-                    '-filter:a', f'atempo={speed_factor}',
-                    '-y', output_path
-                ]
-            else:
-                # Chain multiple atempo filters for extreme adjustments
-                atempos = []
-                remaining = speed_factor
-                while remaining > 2.0:
-                    atempos.append('atempo=2.0')
-                    remaining /= 2.0
-                while remaining < 0.5:
-                    atempos.append('atempo=0.5')
-                    remaining *= 2.0
-                if abs(remaining - 1.0) > 0.01:
-                    atempos.append(f'atempo={remaining}')
-                
-                filter_chain = ','.join(atempos) if atempos else 'anull'
-                cmd = [
-                    'ffmpeg', '-i', temp_output,
-                    '-filter:a', filter_chain,
-                    '-y', output_path
-                ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                os.remove(temp_output)
-            else:
-                print(f"FFmpeg adjustment failed: {result.stderr}")
+            # Check if ffmpeg is available
+            try:
+                result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    # Use FFmpeg for speed adjustment
+                    if 0.5 <= speed_factor <= 2.0:
+                        cmd = [
+                            'ffmpeg', '-i', temp_output,
+                            '-filter:a', f'atempo={speed_factor}',
+                            '-y', output_path
+                        ]
+                    else:
+                        # Chain multiple atempo filters for extreme adjustments
+                        atempos = []
+                        remaining = speed_factor
+                        while remaining > 2.0:
+                            atempos.append('atempo=2.0')
+                            remaining /= 2.0
+                        while remaining < 0.5:
+                            atempos.append('atempo=0.5')
+                            remaining *= 2.0
+                        if abs(remaining - 1.0) > 0.01:
+                            atempos.append(f'atempo={remaining}')
+                        
+                        filter_chain = ','.join(atempos) if atempos else 'anull'
+                        cmd = [
+                            'ffmpeg', '-i', temp_output,
+                            '-filter:a', filter_chain,
+                            '-y', output_path
+                        ]
+                    
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode == 0:
+                        os.remove(temp_output)
+                    else:
+                        print(f"FFmpeg adjustment failed: {result.stderr}")
+                        shutil.move(temp_output, output_path)
+                else:
+                    print("FFmpeg not available, skipping speed adjustment")
+                    shutil.move(temp_output, output_path)
+            except FileNotFoundError:
+                print("FFmpeg not installed, skipping speed adjustment")
                 shutil.move(temp_output, output_path)
         else:
             shutil.move(temp_output, output_path)
