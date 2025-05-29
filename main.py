@@ -15,6 +15,7 @@ import replicate
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_audioclips, CompositeAudioClip
+from moviepy.audio.AudioClip import AudioClip
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -440,39 +441,30 @@ async def process_video_with_perfect_sync(
         # Create perfectly synchronized final audio
         update_job_status(job_id, "creating_synchronized_audio", 90)
         
-        # Method 1: Try concatenating with silence gaps
+        # Method: Create a silent base track and overlay segments
+        from moviepy.audio.AudioClip import AudioClip
+        
+        # Create segments with proper timing
         final_segments = []
-        last_end = 0
         
-        for audio_seg in audio_segments:
-            # Add silence before segment if needed
-            if audio_seg.start > last_end:
-                silence_duration = audio_seg.start - last_end
-                silence = AudioFileClip(lambda t: 0, duration=silence_duration, fps=44100)
-                final_segments.append(silence)
-            
-            # Reset the start time to create a continuous clip
-            segment_duration = audio_seg.duration
-            continuous_seg = audio_seg.set_start(0)
-            final_segments.append(continuous_seg)
-            
-            last_end = audio_seg.start + segment_duration
+        for i, audio_seg in enumerate(audio_segments):
+            # Load the audio segment (it already has its start time set)
+            final_segments.append(audio_seg)
         
-        # Add final silence if needed
-        if last_end < original_duration:
-            final_silence = AudioFileClip(lambda t: 0, duration=original_duration - last_end, fps=44100)
-            final_segments.append(final_silence)
+        # Create the final audio using CompositeAudioClip with proper initialization
+        from moviepy.audio.AudioClip import CompositeAudioClip
         
-        # Concatenate all segments
-        if len(final_segments) > 0:
-            final_audio = concatenate_audioclips(final_segments)
-        else:
-            # Fallback: create silent audio
-            final_audio = AudioFileClip(lambda t: 0, duration=original_duration, fps=44100)
+        # Create a silent background track
+        silent_audio = AudioClip(lambda t: 0, duration=original_duration)
+        silent_audio.fps = 44100
+        
+        # Combine all segments with the silent background
+        all_clips = [silent_audio] + final_segments
+        final_audio = CompositeAudioClip(all_clips)
         
         # Save final audio
         temp_final_audio = os.path.join(temp_dir, "final_dubbed_audio.wav")
-        final_audio.write_audiofile(temp_final_audio, logger=None)
+        final_audio.write_audiofile(temp_final_audio, fps=44100, logger=None)
         
         # Create final video
         update_job_status(job_id, "creating_final_video", 95)
