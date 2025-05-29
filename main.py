@@ -428,6 +428,11 @@ async def process_video_with_perfect_sync(
                 
                 # Load and position audio at exact timing
                 audio_seg = AudioFileClip(segment_output_path)
+                
+                # Debug: Verify audio segment
+                print(f"Loaded segment {i}: duration={audio_seg.duration}s, start_time={segment.start_time}s")
+                
+                # Set the start time for this segment
                 audio_seg = audio_seg.set_start(segment.start_time)
                 audio_segments.append(audio_seg)
                 
@@ -441,30 +446,62 @@ async def process_video_with_perfect_sync(
         # Create perfectly synchronized final audio
         update_job_status(job_id, "creating_synchronized_audio", 90)
         
-        # Method: Create a silent base track and overlay segments
+        # Debug: Print segment information
+        print(f"Total segments to combine: {len(audio_segments)}")
+        for i, seg in enumerate(audio_segments):
+            print(f"Segment {i}: start={seg.start}, duration={seg.duration}")
+        
+        if not audio_segments:
+            raise DubbingError("audio_generation", "No audio segments to combine")
+        
+        # Method: Create a simple concatenated audio with proper gaps
         from moviepy.audio.AudioClip import AudioClip
         
-        # Create segments with proper timing
-        final_segments = []
+        # Sort segments by start time
+        audio_segments.sort(key=lambda x: x.start)
         
-        for i, audio_seg in enumerate(audio_segments):
-            # Load the audio segment (it already has its start time set)
-            final_segments.append(audio_seg)
+        # Build final audio by concatenating segments with silence gaps
+        final_clips = []
+        current_time = 0
         
-        # Create the final audio using CompositeAudioClip with proper initialization
-        from moviepy.audio.AudioClip import CompositeAudioClip
+        for seg in audio_segments:
+            # Add silence gap if needed
+            if seg.start > current_time:
+                gap_duration = seg.start - current_time
+                silence = AudioClip(lambda t: 0, duration=gap_duration)
+                silence.fps = 44100
+                final_clips.append(silence)
+                current_time += gap_duration
+            
+            # Add the actual audio segment (remove its start time)
+            audio_without_start = seg.set_start(0)
+            final_clips.append(audio_without_start)
+            current_time += seg.duration
         
-        # Create a silent background track
-        silent_audio = AudioClip(lambda t: 0, duration=original_duration)
-        silent_audio.fps = 44100
+        # Add final silence if needed
+        if current_time < original_duration:
+            final_silence = AudioClip(lambda t: 0, duration=original_duration - current_time)
+            final_silence.fps = 44100
+            final_clips.append(final_silence)
         
-        # Combine all segments with the silent background
-        all_clips = [silent_audio] + final_segments
-        final_audio = CompositeAudioClip(all_clips)
+        # Concatenate all clips
+        print(f"Concatenating {len(final_clips)} clips")
+        final_audio = concatenate_audioclips(final_clips)
+        
+        # Ensure duration matches video
+        final_audio = final_audio.set_duration(original_duration)
         
         # Save final audio
         temp_final_audio = os.path.join(temp_dir, "final_dubbed_audio.wav")
+        print(f"Writing final audio to {temp_final_audio}")
         final_audio.write_audiofile(temp_final_audio, fps=44100, logger=None)
+        
+        # Verify the audio file was created and has content
+        if os.path.exists(temp_final_audio):
+            file_size = os.path.getsize(temp_final_audio)
+            print(f"Final audio file size: {file_size} bytes")
+            if file_size < 1000:  # Less than 1KB suggests empty audio
+                raise DubbingError("audio_generation", "Generated audio file is empty")
         
         # Create final video
         update_job_status(job_id, "creating_final_video", 95)
