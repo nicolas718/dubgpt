@@ -102,12 +102,22 @@ def extract_word_timings_from_whisperx(whisperx_output: dict) -> List[TimedSegme
     """Extract word-level timings from WhisperX output"""
     segments = []
     
+    print(f"WhisperX output type: {type(whisperx_output)}")
+    print(f"WhisperX output keys: {whisperx_output.keys() if isinstance(whisperx_output, dict) else 'Not a dict'}")
+    
     if isinstance(whisperx_output, dict) and "segments" in whisperx_output:
-        for seg in whisperx_output["segments"]:
+        print(f"Found {len(whisperx_output['segments'])} segments in WhisperX output")
+        
+        for idx, seg in enumerate(whisperx_output["segments"]):
             words = []
+            
+            # Debug segment
+            print(f"Segment {idx}: {seg.keys()}")
+            print(f"  Text: {seg.get('text', '')[:100]}")
             
             # WhisperX provides word-level timing
             if "words" in seg:
+                print(f"  Found {len(seg['words'])} words")
                 for word_data in seg["words"]:
                     word = WordTiming(
                         word=word_data.get("word", ""),
@@ -115,6 +125,8 @@ def extract_word_timings_from_whisperx(whisperx_output: dict) -> List[TimedSegme
                         end=word_data.get("end", 0)
                     )
                     words.append(word)
+            else:
+                print(f"  No word-level timing in segment {idx}")
             
             segment = TimedSegment(
                 text=seg.get("text", "").strip(),
@@ -126,57 +138,95 @@ def extract_word_timings_from_whisperx(whisperx_output: dict) -> List[TimedSegme
             
             if segment.text:
                 segments.append(segment)
+    else:
+        print("ERROR: WhisperX output doesn't have expected format")
+        print(f"Output: {str(whisperx_output)[:500]}")
     
+    print(f"Total segments extracted: {len(segments)}")
     return segments
 
-def group_words_into_dubbing_segments(segments: List[TimedSegment], target_duration: float = 3.0) -> List[TimedSegment]:
-    """Group words into optimal segments for dubbing"""
+def group_words_into_dubbing_segments(segments: List[TimedSegment], target_duration: float = 5.0) -> List[TimedSegment]:
+    """Group words into optimal segments for dubbing - longer segments for better flow"""
     dubbing_segments = []
     
+    # First, combine all words from all segments
+    all_words = []
     for segment in segments:
-        if not segment.words:
-            # No word timing, use segment as-is
-            dubbing_segments.append(segment)
-            continue
+        if segment.words:
+            all_words.extend(segment.words)
+        else:
+            # If no word-level timing, treat the whole segment as one "word"
+            word = WordTiming(
+                word=segment.text,
+                start=segment.start_time,
+                end=segment.end_time
+            )
+            all_words.append(word)
+    
+    if not all_words:
+        # Fallback: use original segments
+        return segments
+    
+    # Sort words by start time
+    all_words.sort(key=lambda w: w.start)
+    
+    # Group words into longer segments (5-7 seconds or natural breaks)
+    current_words = []
+    current_start = None
+    
+    for i, word in enumerate(all_words):
+        if current_start is None:
+            current_start = word.start
         
-        current_words = []
-        current_start = None
+        current_words.append(word)
+        duration = word.end - current_start
         
-        for i, word in enumerate(segment.words):
-            if current_start is None:
-                current_start = word.start
-            
-            current_words.append(word)
-            duration = word.end - current_start
-            
-            # Check if we should create a segment
-            should_segment = False
-            
-            # Natural break points
-            if word.word.rstrip().endswith(('.', '!', '?', ',')):
+        # Check if we should create a segment
+        should_segment = False
+        
+        # Natural break points (strong punctuation)
+        if word.word.rstrip().endswith(('.', '!', '?')):
+            # Only segment if we have enough content (at least 2 seconds)
+            if duration >= 2.0:
                 should_segment = True
-            # Duration limit reached
-            elif duration >= target_duration:
-                should_segment = True
-            # Last word
-            elif i == len(segment.words) - 1:
-                should_segment = True
-            # Long pause after word (>0.3s)
-            elif i < len(segment.words) - 1 and segment.words[i + 1].start - word.end > 0.3:
-                should_segment = True
-            
-            if should_segment and current_words:
-                text = ' '.join([w.word for w in current_words])
-                dubbing_segment = TimedSegment(
-                    text=text.strip(),
-                    start_time=current_start,
-                    end_time=word.end,
-                    duration=word.end - current_start,
-                    words=current_words
-                )
-                dubbing_segments.append(dubbing_segment)
-                current_words = []
-                current_start = None
+        # Maximum duration reached
+        elif duration >= target_duration:
+            should_segment = True
+        # Last word
+        elif i == len(all_words) - 1:
+            should_segment = True
+        # Very long pause after word (>0.5s) and we have enough content
+        elif i < len(all_words) - 1 and all_words[i + 1].start - word.end > 0.5 and duration >= 2.0:
+            should_segment = True
+        
+        if should_segment and current_words:
+            text = ' '.join([w.word for w in current_words])
+            dubbing_segment = TimedSegment(
+                text=text.strip(),
+                start_time=current_start,
+                end_time=word.end,
+                duration=word.end - current_start,
+                words=current_words.copy()
+            )
+            dubbing_segments.append(dubbing_segment)
+            current_words = []
+            current_start = None
+    
+    # Handle any remaining words
+    if current_words:
+        text = ' '.join([w.word for w in current_words])
+        dubbing_segment = TimedSegment(
+            text=text.strip(),
+            start_time=current_start,
+            end_time=current_words[-1].end,
+            duration=current_words[-1].end - current_start,
+            words=current_words
+        )
+        dubbing_segments.append(dubbing_segment)
+    
+    print(f"Created {len(dubbing_segments)} dubbing segments from {len(all_words)} words")
+    for i, seg in enumerate(dubbing_segments):
+        print(f"Segment {i}: '{seg.text[:50]}...' ({seg.duration:.1f}s)")
     
     return dubbing_segments
 
@@ -380,9 +430,19 @@ async def process_video_with_perfect_sync(
         
         print(f"Extracted {len(segments)} segments with {sum(len(s.words) for s in segments)} words")
         
-        # Group into optimal dubbing segments
-        dubbing_segments = group_words_into_dubbing_segments(segments, target_duration=3.0)
+        # If no word-level timing, fall back to segment-level
+        total_words = sum(len(s.words) for s in segments)
+        if total_words == 0:
+            print("WARNING: No word-level timing found. Using segment-level timing instead.")
+            # This is fine, we'll just process larger chunks
+        
+        # Group into optimal dubbing segments - longer segments for better speech flow
+        dubbing_segments = group_words_into_dubbing_segments(segments, target_duration=5.0)
         print(f"Created {len(dubbing_segments)} dubbing segments")
+        
+        # Verify we have good coverage
+        total_duration_covered = sum(seg.duration for seg in dubbing_segments)
+        print(f"Total duration covered by segments: {total_duration_covered:.1f}s out of {original_duration:.1f}s")
         
         # Translate each segment with GPT-4o
         update_job_status(job_id, "translating_with_gpt4o", 35)
@@ -427,14 +487,19 @@ async def process_video_with_perfect_sync(
                 )
                 
                 # Load and position audio at exact timing
-                audio_seg = AudioFileClip(segment_output_path)
-                
-                # Debug: Verify audio segment
-                print(f"Loaded segment {i}: duration={audio_seg.duration}s, start_time={segment.start_time}s")
-                
-                # Set the start time for this segment
-                audio_seg = audio_seg.set_start(segment.start_time)
-                audio_segments.append(audio_seg)
+                if os.path.exists(segment_output_path):
+                    audio_seg = AudioFileClip(segment_output_path)
+                    
+                    # Debug: Verify audio segment
+                    print(f"Loaded segment {i}: duration={audio_seg.duration}s, start_time={segment.start_time}s")
+                    print(f"  Text: '{segment.text[:50]}...'")
+                    print(f"  Translation: '{translation[:50]}...'")
+                    
+                    # Set the start time for this segment
+                    audio_seg = audio_seg.set_start(segment.start_time)
+                    audio_segments.append(audio_seg)
+                else:
+                    print(f"WARNING: Segment file not found: {segment_output_path}")
                 
             except Exception as e:
                 print(f"Error processing segment {i}: {e}")
@@ -454,54 +519,51 @@ async def process_video_with_perfect_sync(
         if not audio_segments:
             raise DubbingError("audio_generation", "No audio segments to combine")
         
-        # Method: Create a simple concatenated audio with proper gaps
+        # Alternative approach: Save each segment at its correct position
+        # First, let's check what we actually have
+        total_audio_duration = sum(seg.duration for seg in audio_segments)
+        print(f"Total audio duration: {total_audio_duration}s (should be close to {original_duration}s)")
+        
+        # If we have very little audio, something went wrong earlier
+        if total_audio_duration < original_duration * 0.5:
+            print("WARNING: Less than 50% of video has audio. Checking for issues...")
+            # Log what segments we're missing
+            covered_time = 0
+            for seg in audio_segments:
+                if seg.start > covered_time + 1:
+                    print(f"  GAP: No audio from {covered_time}s to {seg.start}s")
+                covered_time = max(covered_time, seg.start + seg.duration)
+            if covered_time < original_duration:
+                print(f"  GAP: No audio from {covered_time}s to {original_duration}s")
+        
+        # Method: Create a base audio track and add segments
         from moviepy.audio.AudioClip import AudioClip
         
         # Sort segments by start time
         audio_segments.sort(key=lambda x: x.start)
         
-        # Build final audio by concatenating segments with silence gaps
-        final_clips = []
-        current_time = 0
+        # Create the final audio by overlaying all segments on a silent track
+        # This preserves the exact timing of each segment
+        base_audio = AudioClip(lambda t: 0, duration=original_duration)
+        base_audio.fps = 44100
         
-        for seg in audio_segments:
-            # Add silence gap if needed
-            if seg.start > current_time:
-                gap_duration = seg.start - current_time
-                silence = AudioClip(lambda t: 0, duration=gap_duration)
-                silence.fps = 44100
-                final_clips.append(silence)
-                current_time += gap_duration
-            
-            # Add the actual audio segment (remove its start time)
-            audio_without_start = seg.set_start(0)
-            final_clips.append(audio_without_start)
-            current_time += seg.duration
-        
-        # Add final silence if needed
-        if current_time < original_duration:
-            final_silence = AudioClip(lambda t: 0, duration=original_duration - current_time)
-            final_silence.fps = 44100
-            final_clips.append(final_silence)
-        
-        # Concatenate all clips
-        print(f"Concatenating {len(final_clips)} clips")
-        final_audio = concatenate_audioclips(final_clips)
-        
-        # Ensure duration matches video
-        final_audio = final_audio.set_duration(original_duration)
+        # Create a composite with all segments
+        from moviepy.editor import CompositeAudioClip
+        all_clips = [base_audio] + audio_segments
+        final_audio = CompositeAudioClip(all_clips)
         
         # Save final audio
         temp_final_audio = os.path.join(temp_dir, "final_dubbed_audio.wav")
         print(f"Writing final audio to {temp_final_audio}")
         final_audio.write_audiofile(temp_final_audio, fps=44100, logger=None)
         
-        # Verify the audio file was created and has content
+        # Verify the audio file
         if os.path.exists(temp_final_audio):
             file_size = os.path.getsize(temp_final_audio)
             print(f"Final audio file size: {file_size} bytes")
-            if file_size < 1000:  # Less than 1KB suggests empty audio
-                raise DubbingError("audio_generation", "Generated audio file is empty")
+            audio_check = AudioFileClip(temp_final_audio)
+            print(f"Final audio duration: {audio_check.duration}s")
+            audio_check.close()
         
         # Create final video
         update_job_status(job_id, "creating_final_video", 95)
