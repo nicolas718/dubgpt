@@ -1,33 +1,4 @@
-async def smart_translate_segment(segment: TimedSegment, target_language: str, context: str = "") -> str:
-    """Use GPT-4o to translate with timing constraints"""
-    
-    # Calculate speaking rate constraints
-    word_count = len(segment.text.split())
-    chars_per_second = len(segment.text) / segment.duration if segment.duration > 0 else 30
-    
-    # Estimate target language expansion factor
-    expansion_factors = {
-        "es": 1.25, "fr": 1.30, "de": 1.20, "it": 1.20,
-        "pt": 1.25, "ru": 0.90, "ja": 0.70, "ko": 0.75,
-        "zh": 0.50, "ar": 1.10, "hi": 1.15
-    }
-    
-    expansion = expansion_factors.get(target_language, 1.2)
-    
-    # Allow for some speed adjustment but not too extreme (max 1.3x speed)
-    max_speed_factor = 1.3
-    adjusted_duration = segment.duration * max_speed_factor
-    max_chars = int(len(segment.text) * adjusted_duration / segment.duration / expansion)
-    
-    prompt = f"""Translate this text to {LANGUAGE_NAMES.get(target_language, target_language)}.
-
-Original text: "{segment.text}"
-Duration available: {segment.duration:.1f} seconds
-Maximum characters: {max_chars}
-Maximum speaking speed: {max_speed_factor}x normal
-
-Requirements:
-1. Create a natural translation that can be spoken comimport os
+import os
 import json
 import uuid
 import shutil
@@ -510,8 +481,8 @@ async def process_video_with_perfect_sync(
             print("WARNING: No word-level timing found. Using segment-level timing instead.")
             # This is fine, we'll just process larger chunks
         
-        # Group into optimal dubbing segments - longer segments for better speech flow
-        dubbing_segments = group_words_into_dubbing_segments(segments, target_duration=5.0)
+        # Group into optimal dubbing segments - respecting natural speech patterns
+        dubbing_segments = group_words_into_dubbing_segments(segments, target_duration=4.0)
         print(f"Created {len(dubbing_segments)} dubbing segments")
         
         # Verify we have good coverage
