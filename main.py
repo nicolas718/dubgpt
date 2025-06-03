@@ -259,8 +259,8 @@ def group_words_into_dubbing_segments(segments: List[TimedSegment], target_durat
     
     return dubbing_segments
 
-async def smart_translate_segment(segment: TimedSegment, target_language: str, context: str = "") -> str:
-    """Use GPT-4o to translate with timing constraints"""
+async def smart_translate_segment(segment: TimedSegment, target_language: str, context: str = "") -> tuple[str, str]:
+    """Use GPT-4o to translate with timing constraints and detect emotion"""
     
     # Calculate speaking rate constraints
     word_count = len(segment.text.split())
@@ -284,7 +284,7 @@ async def smart_translate_segment(segment: TimedSegment, target_language: str, c
     max_chars = int(natural_chars * max_speed_factor)
     min_chars = int(natural_chars * min_speed_factor)
     
-    prompt = f"""Translate this text to {LANGUAGE_NAMES.get(target_language, target_language)}.
+    prompt = f"""Translate this text to {LANGUAGE_NAMES.get(target_language, target_language)} and analyze the emotion.
 
 Original text: "{segment.text}"
 Duration available: {segment.duration:.1f} seconds
@@ -297,32 +297,50 @@ CRITICAL Requirements:
 4. Remove filler words if necessary
 5. NEVER sacrifice meaning for brevity
 6. If impossible to fit naturally, prefer slight speed-up over cut content
+7. Preserve the emotional tone of the original
 
 Context: {context[-200:] if context else 'Start of video'}
 
-Return ONLY the translated text."""
+Return in this format:
+TRANSLATION: [your translation here]
+EMOTION: [detected emotion: neutral/happy/sad/angry/excited/serious/questioning]"""
 
     try:
         output = replicate.run(
             settings.gpt4o_model,
             input={
                 "prompt": prompt,
-                "max_tokens": 150,
+                "max_tokens": 200,
                 "temperature": 0.3,
-                "system_prompt": "You are a professional translator specializing in video dubbing. Create translations that sound natural when spoken, matching the original timing as closely as possible."
+                "system_prompt": "You are a professional translator specializing in video dubbing. Create translations that sound natural when spoken, matching the original timing and emotional tone."
             }
         )
         
-        translated_text = ''.join(output).strip()
+        full_output = ''.join(output).strip()
+        
+        # Parse the response
+        lines = full_output.split('\n')
+        translated_text = ""
+        emotion = "neutral"
+        
+        for line in lines:
+            if line.startswith("TRANSLATION:"):
+                translated_text = line.replace("TRANSLATION:", "").strip()
+            elif line.startswith("EMOTION:"):
+                emotion = line.replace("EMOTION:", "").strip().lower()
+        
+        # Fallback if parsing fails
+        if not translated_text:
+            translated_text = full_output
         
         # Log translation for debugging
-        print(f"Segment ({segment.duration:.1f}s): '{segment.text[:30]}...' -> '{translated_text[:30]}...' ({len(translated_text)} chars)")
+        print(f"Segment ({segment.duration:.1f}s): '{segment.text[:30]}...' -> '{translated_text[:30]}...' ({len(translated_text)} chars) [{emotion}]")
         
-        return translated_text
+        return translated_text, emotion
         
     except Exception as e:
         print(f"GPT-4o translation failed: {e}, using fallback")
-        return segment.text[:max_chars]
+        return segment.text[:max_chars], "neutral"
 
 async def generate_dubbed_segment(
     segment: TimedSegment,
@@ -334,16 +352,35 @@ async def generate_dubbed_segment(
     """Generate TTS for a segment with precise duration matching"""
     
     try:
-        # Generate TTS with XTTS
-        with open(speaker_audio_path, "rb") as audio_file:
+        # Extract the specific segment of original audio for better voice matching
+        # This gives XTTS a better reference for tone/emotion
+        segment_audio_path = output_path + "_reference.wav"
+        
+        # Extract the exact segment from original audio
+        original_audio = AudioFileClip(speaker_audio_path)
+        segment_reference = original_audio.subclip(segment.start_time, min(segment.end_time, original_audio.duration))
+        segment_reference.write_audiofile(segment_audio_path, logger=None)
+        original_audio.close()
+        segment_reference.close()
+        
+        # Generate TTS with XTTS using segment-specific reference
+        with open(segment_audio_path, "rb") as audio_file:
             output = replicate.run(
                 settings.xtts_model,
                 input={
                     "text": translated_text,
-                    "speaker": audio_file,
-                    "language": target_language
+                    "speaker": audio_file,  # Use segment-specific audio
+                    "language": target_language,
+                    "temperature": 0.7,  # Add some variation
+                    "length_penalty": 1.0,  # Control speed
+                    "repetition_penalty": 2.0,  # Reduce repetition
+                    "top_k": 50,  # Better quality
+                    "top_p": 0.85  # More natural variation
                 }
             )
+        
+        # Clean up reference file
+        os.remove(segment_audio_path)
         
         if isinstance(output, str):
             audio_url = output
@@ -500,10 +537,11 @@ async def process_video_with_perfect_sync(
             update_job_status(job_id, f"translating_segment_{i+1}_of_{len(dubbing_segments)}", int(progress))
             
             # Smart translation with timing constraints
-            translated_text = await smart_translate_segment(segment, target_language, context)
+            translated_text, emotion = await smart_translate_segment(segment, target_language, context)
             translated_segments.append({
                 "segment": segment,
-                "translation": translated_text
+                "translation": translated_text,
+                "emotion": emotion
             })
             
             # Update context for next segment
