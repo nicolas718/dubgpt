@@ -297,6 +297,7 @@ CRITICAL Requirements:
 4. Remove filler words if necessary
 5. NEVER sacrifice meaning for brevity
 6. If impossible to fit naturally, prefer slight speed-up over cut content
+7. Match the general tone (formal/casual) of the original
 
 Context: {context[-200:] if context else 'Start of video'}
 
