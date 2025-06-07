@@ -334,7 +334,7 @@ async def generate_dubbed_segment(
     """Generate TTS for a segment with precise duration matching"""
     
     try:
-        # Generate TTS with XTTS - simple and consistent
+        # Generate TTS with XTTS
         with open(speaker_audio_path, "rb") as audio_file:
             output = replicate.run(
                 settings.xtts_model,
@@ -344,13 +344,6 @@ async def generate_dubbed_segment(
                     "language": target_language
                 }
             )
-        
-        if isinstance(output, str):
-            audio_url = output
-        elif isinstance(output, list) and len(output) > 0:
-            audio_url = output[0]
-        else:
-            raise ValueError("Invalid output from XTTS")
         
         if isinstance(output, str):
             audio_url = output
