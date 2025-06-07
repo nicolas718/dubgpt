@@ -297,7 +297,6 @@ CRITICAL Requirements:
 4. Remove filler words if necessary
 5. NEVER sacrifice meaning for brevity
 6. If impossible to fit naturally, prefer slight speed-up over cut content
-7. Maintain a consistent, professional tone (avoid overly emotional language)
 
 Context: {context[-200:] if context else 'Start of video'}
 
@@ -335,44 +334,16 @@ async def generate_dubbed_segment(
     """Generate TTS for a segment with precise duration matching"""
     
     try:
-        # Use a longer reference audio (not just the segment, but a window around it)
-        # This gives XTTS some context without being too specific
-        segment_audio_path = None
-        
-        # Only extract segment reference for very short segments or emotional moments
-        if segment.duration < 2.0 or any(word in segment.text.lower() for word in ['!', '?', 'laugh', 'cry', 'shout']):
-            segment_audio_path = output_path + "_reference.wav"
-            
-            # Extract a WIDER window (segment + 1 second before/after for context)
-            original_audio = AudioFileClip(speaker_audio_path)
-            start_time = max(0, segment.start_time - 1.0)
-            end_time = min(original_audio.duration, segment.end_time + 1.0)
-            
-            segment_reference = original_audio.subclip(start_time, end_time)
-            segment_reference.write_audiofile(segment_audio_path, logger=None)
-            original_audio.close()
-            segment_reference.close()
-            
-            audio_file_path = segment_audio_path
-        else:
-            audio_file_path = speaker_audio_path
-        
-        # Generate TTS with XTTS - mild parameters
-        with open(audio_file_path, "rb") as audio_file:
+        # Generate TTS with XTTS - simple and consistent
+        with open(speaker_audio_path, "rb") as audio_file:
             output = replicate.run(
                 settings.xtts_model,
                 input={
                     "text": translated_text,
                     "speaker": audio_file,
-                    "language": target_language,
-                    "temperature": 0.5,  # Very mild variation (default is ~0.7)
-                    "top_p": 0.9  # Slightly more consistent (default is 0.85)
+                    "language": target_language
                 }
             )
-        
-        # Clean up reference file if created
-        if segment_audio_path and os.path.exists(segment_audio_path):
-            os.remove(segment_audio_path)
         
         if isinstance(output, str):
             audio_url = output
