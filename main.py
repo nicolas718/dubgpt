@@ -43,6 +43,8 @@ class Settings:
         self.gpt4o_model = "openai/gpt-4o"
         # XTTS for voice synthesis
         self.xtts_model = "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e"
+        # LatentSync for lip sync
+        self.latentsync_model = "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04"
         self.max_file_size_mb = int(os.getenv("MAX_FILE_SIZE_MB", "500"))
 
 settings = Settings()
@@ -85,7 +87,7 @@ async def lifespan(app: FastAPI):
             except:
                 pass
 
-app = FastAPI(title="Polydub API", version="4.0", lifespan=lifespan)
+app = FastAPI(title="Polydub API", version="24.0", lifespan=lifespan)
 
 # Helper functions
 def update_job_status(job_id: str, status: str, progress: int = 0, 
@@ -334,7 +336,7 @@ async def generate_dubbed_segment(
     """Generate TTS for a segment with precise duration matching"""
     
     try:
-        # Generate TTS with XTTS
+        # Generate TTS with XTTS - simple and consistent
         with open(speaker_audio_path, "rb") as audio_file:
             output = replicate.run(
                 settings.xtts_model,
@@ -430,11 +432,42 @@ async def generate_dubbed_segment(
     except Exception as e:
         raise DubbingError("tts_generation", str(e))
 
+async def apply_lip_sync(
+    video_path: str,
+    audio_path: str,
+    output_path: str
+) -> str:
+    """Apply lip sync to dubbed video using LatentSync"""
+    
+    try:
+        print("Applying lip sync with LatentSync...")
+        
+        # Run LatentSync
+        output = replicate.run(
+            settings.latentsync_model,
+            input={
+                "audio": open(audio_path, "rb"),
+                "video": open(video_path, "rb")
+            }
+        )
+        
+        # The output is a file-like object, save it
+        with open(output_path, "wb") as f:
+            f.write(output.read())
+        
+        print(f"Lip sync completed: {output_path}")
+        return output_path
+        
+    except Exception as e:
+        print(f"Lip sync failed: {e}")
+        raise DubbingError("lip_sync", str(e))
+
 async def process_video_with_perfect_sync(
     job_id: str,
     file_path: str,
     filename: str,
-    target_language: str
+    target_language: str,
+    enable_lip_sync: bool = False
 ):
     """Process video with word-level synchronization using WhisperX and GPT-4o"""
     temp_dir = os.path.dirname(file_path)
@@ -637,6 +670,26 @@ async def process_video_with_perfect_sync(
             except:
                 pass
         
+        # Apply lip sync if enabled
+        if enable_lip_sync:
+            update_job_status(job_id, "applying_lip_sync", 97)
+            
+            lip_sync_output = os.path.join(temp_dir, f"{os.path.splitext(filename)[0]}_dubbed_{target_language}_lip_synced.mp4")
+            
+            try:
+                await apply_lip_sync(
+                    video_path=file_path,  # Original video for face
+                    audio_path=output_path,  # Dubbed video for audio
+                    output_path=lip_sync_output
+                )
+                
+                # Use lip-synced version as final output
+                output_path = lip_sync_output
+                
+            except Exception as e:
+                print(f"Lip sync failed, using non-lip-synced version: {e}")
+                # Continue with regular dubbed video
+        
         update_job_status(job_id, "completed", 100, result=output_path)
         
     except DubbingError as e:
@@ -650,12 +703,13 @@ async def process_video_with_perfect_sync(
 @app.get("/")
 def read_root():
     return {
-        "message": "Polydub v4.0 - Perfect Sync Edition",
+        "message": "Polydub v24.0 - Perfect Sync Edition with Lip Sync",
         "features": [
             "WhisperX word-level transcription",
             "GPT-4o smart translation",
             "XTTS voice cloning",
-            "Perfect synchronization"
+            "Perfect synchronization",
+            "LatentSync lip synchronization (optional)"
         ],
         "endpoints": {
             "/upload": "POST - Upload video for dubbing",
@@ -678,7 +732,8 @@ def get_formats():
 async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    target_language: str = Form(...)
+    target_language: str = Form(...),
+    enable_lip_sync: bool = Form(False)
 ):
     # Validate inputs
     file_size = 0
@@ -717,13 +772,14 @@ async def upload_video(
             shutil.copyfileobj(temp_file, f)
         temp_file.close()
         
-        # Start perfect sync processing
+        # Start perfect sync processing with optional lip sync
         background_tasks.add_task(
             process_video_with_perfect_sync,
             job_id,
             file_path,
             file.filename,
-            target_language
+            target_language,
+            enable_lip_sync
         )
         
         return {
@@ -733,7 +789,8 @@ async def upload_video(
                 "transcription": "WhisperX (word-level)",
                 "translation": "GPT-4o (smart)",
                 "voice": "XTTS (cloned)",
-                "sync": "Perfect word-level"
+                "sync": "Perfect word-level",
+                "lip_sync": "Enabled" if enable_lip_sync else "Disabled"
             },
             "status_url": f"/status/{job_id}",
             "download_url": f"/download/{job_id}"
