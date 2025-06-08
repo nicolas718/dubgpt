@@ -259,8 +259,8 @@ def group_words_into_dubbing_segments(segments: List[TimedSegment], target_durat
     
     return dubbing_segments
 
-async def smart_translate_segment(segment: TimedSegment, target_language: str, context: str = "") -> tuple[str, str]:
-    """Use GPT-4o to translate with timing constraints and detect emotion"""
+async def smart_translate_segment(segment: TimedSegment, target_language: str, context: str = "") -> str:
+    """Use GPT-4o to translate with timing constraints"""
     
     # Calculate speaking rate constraints
     word_count = len(segment.text.split())
@@ -284,7 +284,7 @@ async def smart_translate_segment(segment: TimedSegment, target_language: str, c
     max_chars = int(natural_chars * max_speed_factor)
     min_chars = int(natural_chars * min_speed_factor)
     
-    prompt = f"""Translate this text to {LANGUAGE_NAMES.get(target_language, target_language)} and analyze the emotion.
+    prompt = f"""Translate this text to {LANGUAGE_NAMES.get(target_language, target_language)}.
 
 Original text: "{segment.text}"
 Duration available: {segment.duration:.1f} seconds
@@ -297,50 +297,32 @@ CRITICAL Requirements:
 4. Remove filler words if necessary
 5. NEVER sacrifice meaning for brevity
 6. If impossible to fit naturally, prefer slight speed-up over cut content
-7. Preserve the emotional tone of the original
 
 Context: {context[-200:] if context else 'Start of video'}
 
-Return in this format:
-TRANSLATION: [your translation here]
-EMOTION: [detected emotion: neutral/happy/sad/angry/excited/serious/questioning]"""
+Return ONLY the translated text."""
 
     try:
         output = replicate.run(
             settings.gpt4o_model,
             input={
                 "prompt": prompt,
-                "max_tokens": 200,
+                "max_tokens": 150,
                 "temperature": 0.3,
-                "system_prompt": "You are a professional translator specializing in video dubbing. Create translations that sound natural when spoken, matching the original timing and emotional tone."
+                "system_prompt": "You are a professional translator specializing in video dubbing. Create translations that sound natural when spoken, matching the original timing as closely as possible."
             }
         )
         
-        full_output = ''.join(output).strip()
-        
-        # Parse the response
-        lines = full_output.split('\n')
-        translated_text = ""
-        emotion = "neutral"
-        
-        for line in lines:
-            if line.startswith("TRANSLATION:"):
-                translated_text = line.replace("TRANSLATION:", "").strip()
-            elif line.startswith("EMOTION:"):
-                emotion = line.replace("EMOTION:", "").strip().lower()
-        
-        # Fallback if parsing fails
-        if not translated_text:
-            translated_text = full_output
+        translated_text = ''.join(output).strip()
         
         # Log translation for debugging
-        print(f"Segment ({segment.duration:.1f}s): '{segment.text[:30]}...' -> '{translated_text[:30]}...' ({len(translated_text)} chars) [{emotion}]")
+        print(f"Segment ({segment.duration:.1f}s): '{segment.text[:30]}...' -> '{translated_text[:30]}...' ({len(translated_text)} chars)")
         
-        return translated_text, emotion
+        return translated_text
         
     except Exception as e:
         print(f"GPT-4o translation failed: {e}, using fallback")
-        return segment.text[:max_chars], "neutral"
+        return segment.text[:max_chars]
 
 async def generate_dubbed_segment(
     segment: TimedSegment,
@@ -352,35 +334,101 @@ async def generate_dubbed_segment(
     """Generate TTS for a segment with precise duration matching"""
     
     try:
-        # Extract the specific segment of original audio for better voice matching
-        # This gives XTTS a better reference for tone/emotion
-        segment_audio_path = output_path + "_reference.wav"
-        
-        # Extract the exact segment from original audio
-        original_audio = AudioFileClip(speaker_audio_path)
-        segment_reference = original_audio.subclip(segment.start_time, min(segment.end_time, original_audio.duration))
-        segment_reference.write_audiofile(segment_audio_path, logger=None)
-        original_audio.close()
-        segment_reference.close()
-        
-        # Generate TTS with XTTS using segment-specific reference
-        with open(segment_audio_path, "rb") as audio_file:
+        # Generate TTS with XTTS - simple and consistent (REVERTED TO ORIGINAL)
+        with open(speaker_audio_path, "rb") as audio_file:
             output = replicate.run(
                 settings.xtts_model,
                 input={
                     "text": translated_text,
-                    "speaker": audio_file,  # Use segment-specific audio
-                    "language": target_language,
-                    "temperature": 0.7,  # Add some variation
-                    "length_penalty": 1.0,  # Control speed
-                    "repetition_penalty": 2.0,  # Reduce repetition
-                    "top_k": 50,  # Better quality
-                    "top_p": 0.85  # More natural variation
+                    "speaker": audio_file,
+                    "language": target_language
                 }
             )
         
-        # Clean up reference file
-        os.remove(segment_audio_path)
+        if isinstance(output, str):
+            audio_url = output
+        elif isinstance(output, list) and len(output) > 0:
+            audio_url = output[0]
+        else:
+            raise ValueError("Invalid output from XTTS")
+        
+        # Download audio
+        temp_output = output_path + "_temp.wav"
+        with requests.get(audio_url, stream=True) as r:
+            r.raise_for_status()
+            with open(temp_output, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        
+        # Adjust duration to match exactly
+        audio_clip = AudioFileClip(temp_output)
+        actual_duration = audio_clip.duration
+        audio_clip.close()
+        
+        # Limit speed adjustment to natural range
+        MAX_SPEED = 1.25  # No more than 25% faster
+        MIN_SPEED = 0.85  # No more than 15% slower
+        
+        if abs(actual_duration - segment.duration) > 0.05:  # 50ms tolerance
+            speed_factor = actual_duration / segment.duration
+            
+            # Log extreme speed adjustments
+            if speed_factor > MAX_SPEED or speed_factor < MIN_SPEED:
+                print(f"WARNING: Segment requires {speed_factor:.2f}x speed adjustment")
+                print(f"  Original: '{segment.text[:50]}...' ({segment.duration:.1f}s)")
+                print(f"  Translation: '{translated_text[:50]}...' ({actual_duration:.1f}s)")
+            
+            # Clamp speed factor to acceptable range
+            speed_factor = max(MIN_SPEED, min(MAX_SPEED, speed_factor))
+            
+            # Check if ffmpeg is available
+            try:
+                result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    # Use FFmpeg for speed adjustment
+                    cmd = [
+                        'ffmpeg', '-i', temp_output,
+                        '-filter:a', f'atempo={speed_factor}',
+                        '-y', output_path
+                    ]
+                    
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode == 0:
+                        os.remove(temp_output)
+                        
+                        # Verify the adjusted duration
+                        adjusted_clip = AudioFileClip(output_path)
+                        final_duration = adjusted_clip.duration
+                        adjusted_clip.close()
+                        
+                        # If still too long/short after max adjustment, trim/pad
+                        if final_duration > segment.duration + 0.1:
+                            print(f"  Trimming audio from {final_duration:.1f}s to {segment.duration:.1f}s")
+                            # Trim the audio
+                            cmd = [
+                                'ffmpeg', '-i', output_path,
+                                '-t', str(segment.duration),
+                                '-y', output_path + '_trimmed.wav'
+                            ]
+                            subprocess.run(cmd, capture_output=True)
+                            os.remove(output_path)
+                            os.rename(output_path + '_trimmed.wav', output_path)
+                    else:
+                        print(f"FFmpeg adjustment failed: {result.stderr}")
+                        shutil.move(temp_output, output_path)
+                else:
+                    print("FFmpeg not available, skipping speed adjustment")
+                    shutil.move(temp_output, output_path)
+            except FileNotFoundError:
+                print("FFmpeg not installed, skipping speed adjustment")
+                shutil.move(temp_output, output_path)
+        else:
+            shutil.move(temp_output, output_path)
+        
+        return output_path
+        
+    except Exception as e:
+        raise DubbingError("tts_generation", str(e))
         
         if isinstance(output, str):
             audio_url = output
@@ -537,11 +585,10 @@ async def process_video_with_perfect_sync(
             update_job_status(job_id, f"translating_segment_{i+1}_of_{len(dubbing_segments)}", int(progress))
             
             # Smart translation with timing constraints
-            translated_text, emotion = await smart_translate_segment(segment, target_language, context)
+            translated_text = await smart_translate_segment(segment, target_language, context)
             translated_segments.append({
                 "segment": segment,
-                "translation": translated_text,
-                "emotion": emotion
+                "translation": translated_text
             })
             
             # Update context for next segment
@@ -809,21 +856,11 @@ def download_video(job_id: str):
     if not status["result"] or not os.path.exists(status["result"]):
         raise HTTPException(status_code=404, detail="Output file not found")
     
-    # Clean up after download
-    def cleanup():
-        try:
-            temp_dir = os.path.dirname(status["result"])
-            if os.path.exists(temp_dir) and temp_dir.startswith(tempfile.gettempdir()):
-                shutil.rmtree(temp_dir)
-            del job_status[job_id]
-        except:
-            pass
-    
+    # Don't pass the cleanup as BackgroundTasks object
     return FileResponse(
         status["result"], 
         media_type="video/mp4",
-        filename=os.path.basename(status["result"]),
-        background=BackgroundTasks([cleanup])
+        filename=os.path.basename(status["result"])
     )
 
 @app.get("/health")
