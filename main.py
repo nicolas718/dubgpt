@@ -43,8 +43,6 @@ class Settings:
         self.gpt4o_model = "openai/gpt-4o"
         # XTTS for voice synthesis
         self.xtts_model = "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e"
-        # LatentSync for lip sync
-        self.latentsync_model = "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04"
         self.max_file_size_mb = int(os.getenv("MAX_FILE_SIZE_MB", "500"))
 
 settings = Settings()
@@ -87,7 +85,7 @@ async def lifespan(app: FastAPI):
             except:
                 pass
 
-app = FastAPI(title="Polydub API", version="24.0", lifespan=lifespan)
+app = FastAPI(title="Polydub API", version="4.0", lifespan=lifespan)
 
 # Helper functions
 def update_job_status(job_id: str, status: str, progress: int = 0, 
@@ -261,8 +259,8 @@ def group_words_into_dubbing_segments(segments: List[TimedSegment], target_durat
     
     return dubbing_segments
 
-async def smart_translate_segment(segment: TimedSegment, target_language: str, context: str = "") -> str:
-    """Use GPT-4o to translate with timing constraints"""
+async def smart_translate_segment(segment: TimedSegment, target_language: str, context: str = "") -> tuple[str, str]:
+    """Use GPT-4o to translate with timing constraints and detect emotion"""
     
     # Calculate speaking rate constraints
     word_count = len(segment.text.split())
@@ -286,7 +284,7 @@ async def smart_translate_segment(segment: TimedSegment, target_language: str, c
     max_chars = int(natural_chars * max_speed_factor)
     min_chars = int(natural_chars * min_speed_factor)
     
-    prompt = f"""Translate this text to {LANGUAGE_NAMES.get(target_language, target_language)}.
+    prompt = f"""Translate this text to {LANGUAGE_NAMES.get(target_language, target_language)} and analyze the emotion.
 
 Original text: "{segment.text}"
 Duration available: {segment.duration:.1f} seconds
@@ -299,32 +297,50 @@ CRITICAL Requirements:
 4. Remove filler words if necessary
 5. NEVER sacrifice meaning for brevity
 6. If impossible to fit naturally, prefer slight speed-up over cut content
+7. Preserve the emotional tone of the original
 
 Context: {context[-200:] if context else 'Start of video'}
 
-Return ONLY the translated text."""
+Return in this format:
+TRANSLATION: [your translation here]
+EMOTION: [detected emotion: neutral/happy/sad/angry/excited/serious/questioning]"""
 
     try:
         output = replicate.run(
             settings.gpt4o_model,
             input={
                 "prompt": prompt,
-                "max_tokens": 150,
+                "max_tokens": 200,
                 "temperature": 0.3,
-                "system_prompt": "You are a professional translator specializing in video dubbing. Create translations that sound natural when spoken, matching the original timing as closely as possible."
+                "system_prompt": "You are a professional translator specializing in video dubbing. Create translations that sound natural when spoken, matching the original timing and emotional tone."
             }
         )
         
-        translated_text = ''.join(output).strip()
+        full_output = ''.join(output).strip()
+        
+        # Parse the response
+        lines = full_output.split('\n')
+        translated_text = ""
+        emotion = "neutral"
+        
+        for line in lines:
+            if line.startswith("TRANSLATION:"):
+                translated_text = line.replace("TRANSLATION:", "").strip()
+            elif line.startswith("EMOTION:"):
+                emotion = line.replace("EMOTION:", "").strip().lower()
+        
+        # Fallback if parsing fails
+        if not translated_text:
+            translated_text = full_output
         
         # Log translation for debugging
-        print(f"Segment ({segment.duration:.1f}s): '{segment.text[:30]}...' -> '{translated_text[:30]}...' ({len(translated_text)} chars)")
+        print(f"Segment ({segment.duration:.1f}s): '{segment.text[:30]}...' -> '{translated_text[:30]}...' ({len(translated_text)} chars) [{emotion}]")
         
-        return translated_text
+        return translated_text, emotion
         
     except Exception as e:
         print(f"GPT-4o translation failed: {e}, using fallback")
-        return segment.text[:max_chars]
+        return segment.text[:max_chars], "neutral"
 
 async def generate_dubbed_segment(
     segment: TimedSegment,
@@ -336,16 +352,35 @@ async def generate_dubbed_segment(
     """Generate TTS for a segment with precise duration matching"""
     
     try:
-        # Generate TTS with XTTS - simple and consistent
-        with open(speaker_audio_path, "rb") as audio_file:
+        # Extract the specific segment of original audio for better voice matching
+        # This gives XTTS a better reference for tone/emotion
+        segment_audio_path = output_path + "_reference.wav"
+        
+        # Extract the exact segment from original audio
+        original_audio = AudioFileClip(speaker_audio_path)
+        segment_reference = original_audio.subclip(segment.start_time, min(segment.end_time, original_audio.duration))
+        segment_reference.write_audiofile(segment_audio_path, logger=None)
+        original_audio.close()
+        segment_reference.close()
+        
+        # Generate TTS with XTTS using segment-specific reference
+        with open(segment_audio_path, "rb") as audio_file:
             output = replicate.run(
                 settings.xtts_model,
                 input={
                     "text": translated_text,
-                    "speaker": audio_file,
-                    "language": target_language
+                    "speaker": audio_file,  # Use segment-specific audio
+                    "language": target_language,
+                    "temperature": 0.7,  # Add some variation
+                    "length_penalty": 1.0,  # Control speed
+                    "repetition_penalty": 2.0,  # Reduce repetition
+                    "top_k": 50,  # Better quality
+                    "top_p": 0.85  # More natural variation
                 }
             )
+        
+        # Clean up reference file
+        os.remove(segment_audio_path)
         
         if isinstance(output, str):
             audio_url = output
@@ -432,42 +467,11 @@ async def generate_dubbed_segment(
     except Exception as e:
         raise DubbingError("tts_generation", str(e))
 
-async def apply_lip_sync(
-    video_path: str,
-    audio_path: str,
-    output_path: str
-) -> str:
-    """Apply lip sync to dubbed video using LatentSync"""
-    
-    try:
-        print("Applying lip sync with LatentSync...")
-        
-        # Run LatentSync
-        output = replicate.run(
-            settings.latentsync_model,
-            input={
-                "audio": open(audio_path, "rb"),
-                "video": open(video_path, "rb")
-            }
-        )
-        
-        # The output is a file-like object, save it
-        with open(output_path, "wb") as f:
-            f.write(output.read())
-        
-        print(f"Lip sync completed: {output_path}")
-        return output_path
-        
-    except Exception as e:
-        print(f"Lip sync failed: {e}")
-        raise DubbingError("lip_sync", str(e))
-
 async def process_video_with_perfect_sync(
     job_id: str,
     file_path: str,
     filename: str,
-    target_language: str,
-    enable_lip_sync: bool = False
+    target_language: str
 ):
     """Process video with word-level synchronization using WhisperX and GPT-4o"""
     temp_dir = os.path.dirname(file_path)
@@ -533,10 +537,11 @@ async def process_video_with_perfect_sync(
             update_job_status(job_id, f"translating_segment_{i+1}_of_{len(dubbing_segments)}", int(progress))
             
             # Smart translation with timing constraints
-            translated_text = await smart_translate_segment(segment, target_language, context)
+            translated_text, emotion = await smart_translate_segment(segment, target_language, context)
             translated_segments.append({
                 "segment": segment,
-                "translation": translated_text
+                "translation": translated_text,
+                "emotion": emotion
             })
             
             # Update context for next segment
@@ -670,26 +675,6 @@ async def process_video_with_perfect_sync(
             except:
                 pass
         
-        # Apply lip sync if enabled
-        if enable_lip_sync:
-            update_job_status(job_id, "applying_lip_sync", 97)
-            
-            lip_sync_output = os.path.join(temp_dir, f"{os.path.splitext(filename)[0]}_dubbed_{target_language}_lip_synced.mp4")
-            
-            try:
-                await apply_lip_sync(
-                    video_path=file_path,  # Original video for face
-                    audio_path=output_path,  # Dubbed video for audio
-                    output_path=lip_sync_output
-                )
-                
-                # Use lip-synced version as final output
-                output_path = lip_sync_output
-                
-            except Exception as e:
-                print(f"Lip sync failed, using non-lip-synced version: {e}")
-                # Continue with regular dubbed video
-        
         update_job_status(job_id, "completed", 100, result=output_path)
         
     except DubbingError as e:
@@ -703,13 +688,12 @@ async def process_video_with_perfect_sync(
 @app.get("/")
 def read_root():
     return {
-        "message": "Polydub v24.0 - Perfect Sync Edition with Lip Sync",
+        "message": "Polydub v4.0 - Perfect Sync Edition",
         "features": [
             "WhisperX word-level transcription",
             "GPT-4o smart translation",
             "XTTS voice cloning",
-            "Perfect synchronization",
-            "LatentSync lip synchronization (optional)"
+            "Perfect synchronization"
         ],
         "endpoints": {
             "/upload": "POST - Upload video for dubbing",
@@ -732,8 +716,7 @@ def get_formats():
 async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    target_language: str = Form(...),
-    enable_lip_sync: bool = Form(False)
+    target_language: str = Form(...)
 ):
     # Validate inputs
     file_size = 0
@@ -772,14 +755,13 @@ async def upload_video(
             shutil.copyfileobj(temp_file, f)
         temp_file.close()
         
-        # Start perfect sync processing with optional lip sync
+        # Start perfect sync processing
         background_tasks.add_task(
             process_video_with_perfect_sync,
             job_id,
             file_path,
             file.filename,
-            target_language,
-            enable_lip_sync
+            target_language
         )
         
         return {
@@ -789,8 +771,7 @@ async def upload_video(
                 "transcription": "WhisperX (word-level)",
                 "translation": "GPT-4o (smart)",
                 "voice": "XTTS (cloned)",
-                "sync": "Perfect word-level",
-                "lip_sync": "Enabled" if enable_lip_sync else "Disabled"
+                "sync": "Perfect word-level"
             },
             "status_url": f"/status/{job_id}",
             "download_url": f"/download/{job_id}"
