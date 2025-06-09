@@ -397,18 +397,62 @@ async def apply_lip_sync(
         print(f"Video: {video_path} ({os.path.getsize(video_path) / 1024 / 1024:.1f} MB)")
         print(f"Audio: {audio_path} ({os.path.getsize(audio_path) / 1024 / 1024:.1f} MB)")
         
-        # Run LatentSync
-        with open(video_path, "rb") as video_file, open(audio_path, "rb") as audio_file:
-            print("Calling LatentSync API...")
+        # Check if files exist and are readable
+        if not os.path.exists(video_path):
+            raise ValueError(f"Video file not found: {video_path}")
+        if not os.path.exists(audio_path):
+            raise ValueError(f"Audio file not found: {audio_path}")
+        
+        # Run LatentSync with better error handling
+        try:
+            with open(video_path, "rb") as video_file, open(audio_path, "rb") as audio_file:
+                print("Calling LatentSync API...")
+                print(f"Model: {settings.latentsync_model}")
+                
+                # Try with explicit version
+                output = replicate.run(
+                    "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04",
+                    input={
+                        "video": video_file,
+                        "audio": audio_file
+                    }
+                )
+                
+                print(f"LatentSync API call successful!")
+                print(f"Output type: {type(output)}")
+                
+        except Exception as api_error:
+            print(f"LatentSync API error: {api_error}")
+            print(f"Error type: {type(api_error)}")
+            
+            # Try alternative approach - using file paths instead of file objects
+            print("\nTrying alternative approach with URLs...")
+            
+            # Upload files to a temporary URL service or use local file paths
+            # For now, let's try with the Replicate file upload
+            import replicate.file
+            
+            print("Uploading video to Replicate...")
+            with open(video_path, "rb") as f:
+                video_url = replicate.file.upload(f, "video.mp4")
+            print(f"Video URL: {video_url}")
+            
+            print("Uploading audio to Replicate...")
+            with open(audio_path, "rb") as f:
+                audio_url = replicate.file.upload(f, "audio.wav")
+            print(f"Audio URL: {audio_url}")
+            
+            # Try again with URLs
             output = replicate.run(
-                settings.latentsync_model,
+                "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04",
                 input={
-                    "video": video_file,
-                    "audio": audio_file
+                    "video": video_url,
+                    "audio": audio_url
                 }
             )
         
         print(f"LatentSync output type: {type(output)}")
+        print(f"LatentSync output: {str(output)[:200]}...")  # First 200 chars
         
         # Handle output
         with open(output_path, "wb") as f:
@@ -424,15 +468,34 @@ async def apply_lip_sync(
             elif isinstance(output, str):
                 print(f"Output is URL: {output}")
                 response = requests.get(output)
+                print(f"Download response status: {response.status_code}")
                 response.raise_for_status()
                 f.write(response.content)
                 print(f"Downloaded {len(response.content)} bytes")
             else:
-                raise ValueError(f"Unexpected output type: {type(output)}")
+                # Try to iterate if it's a generator
+                print(f"Output is {type(output)}, trying to iterate...")
+                content = b""
+                for chunk in output:
+                    if isinstance(chunk, bytes):
+                        content += chunk
+                    elif isinstance(chunk, str):
+                        content += chunk.encode()
+                f.write(content)
+                print(f"Wrote {len(content)} bytes from iterator")
         
         # Verify
         if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             print(f"LIP SYNC SUCCESS! Output: {output_path} ({os.path.getsize(output_path) / 1024 / 1024:.1f} MB)")
+            
+            # Verify it's a valid video
+            try:
+                test_video = VideoFileClip(output_path)
+                print(f"Lip synced video duration: {test_video.duration}s")
+                test_video.close()
+            except Exception as e:
+                print(f"Warning: Could not verify video: {e}")
+            
             return output_path
         else:
             raise ValueError("Lip sync output file is empty or missing")
