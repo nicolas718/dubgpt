@@ -393,13 +393,13 @@ async def apply_lip_sync(
     try:
         print("="*50)
         print("APPLYING LIP SYNC WITH LATENTSYNC")
+        print("="*50)
         print(f"Video: {video_path} ({os.path.getsize(video_path) / 1024 / 1024:.1f} MB)")
         print(f"Audio: {audio_path} ({os.path.getsize(audio_path) / 1024 / 1024:.1f} MB)")
-        print("="*50)
         
         # Run LatentSync
         with open(video_path, "rb") as video_file, open(audio_path, "rb") as audio_file:
-            print("Calling LatentSync...")
+            print("Calling LatentSync API...")
             output = replicate.run(
                 settings.latentsync_model,
                 input={
@@ -410,7 +410,7 @@ async def apply_lip_sync(
         
         print(f"LatentSync output type: {type(output)}")
         
-        # Save the output
+        # Handle output
         with open(output_path, "wb") as f:
             if hasattr(output, 'read'):
                 print("Output is file-like, reading...")
@@ -430,7 +430,7 @@ async def apply_lip_sync(
             else:
                 raise ValueError(f"Unexpected output type: {type(output)}")
         
-        # Verify output
+        # Verify
         if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             print(f"LIP SYNC SUCCESS! Output: {output_path} ({os.path.getsize(output_path) / 1024 / 1024:.1f} MB)")
             return output_path
@@ -616,8 +616,9 @@ async def process_video_with_perfect_sync(
             except:
                 pass
         
+        # Apply lip sync if enabled
         if enable_lip_sync:
-            print("="*50)
+            print("\n" + "="*50)
             print("LIP SYNC ENABLED - STARTING LIP SYNC PROCESS")
             print("="*50)
             update_job_status(job_id, "applying_lip_sync", 97)
@@ -627,18 +628,22 @@ async def process_video_with_perfect_sync(
             try:
                 await apply_lip_sync(
                     video_path=file_path,  # Original video
-                    audio_path=temp_final_audio,  # Dubbed audio
+                    audio_path=temp_final_audio,  # Dubbed audio WAV file
                     output_path=lip_sync_output
                 )
                 
                 # Use lip-synced version as final output
-                output_path = lip_sync_output
-                print("USING LIP SYNCED VERSION AS FINAL OUTPUT")
+                if os.path.exists(lip_sync_output):
+                    output_path = lip_sync_output
+                    print("LIP SYNC COMPLETE - Using lip-synced video as final output")
+                else:
+                    print("LIP SYNC FAILED - No output file, using regular dubbed video")
                 
             except Exception as e:
-                print(f"LIP SYNC FAILED - USING NON-LIP-SYNCED VERSION: {e}")
+                print(f"LIP SYNC ERROR: {e}")
+                print("Continuing with non-lip-synced video")
         else:
-            print("LIP SYNC DISABLED - NOT APPLYING LIP SYNC")
+            print("\nLIP SYNC DISABLED - Skipping lip sync")
         
         update_job_status(job_id, "completed", 100, result=output_path)
         
@@ -652,7 +657,7 @@ async def process_video_with_perfect_sync(
 @app.get("/")
 def read_root():
     return {
-        "message": "Polydub v5.0 - WITH LIP SYNC",
+        "message": "Polydub v5.0 - Working Version",
         "features": [
             "WhisperX word-level transcription",
             "GPT-4o smart translation",
@@ -681,18 +686,18 @@ async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     target_language: str = Form(...),
-    enable_lip_sync: str = Form("false")  # Accept as string
+    enable_lip_sync: str = Form("false")  # Accept as string from Postman
 ):
-    print("="*50)
-    print("UPLOAD REQUEST RECEIVED")
+    print("\n" + "="*50)
+    print("NEW UPLOAD REQUEST")
     print(f"File: {file.filename}")
     print(f"Target language: {target_language}")
-    print(f"Enable lip sync (raw): '{enable_lip_sync}'")
+    print(f"Enable lip sync (raw string): '{enable_lip_sync}'")
     
     # Convert string to boolean
     enable_lip_sync_bool = enable_lip_sync.lower() in ["true", "1", "yes", "on"]
-    print(f"Enable lip sync (boolean): {enable_lip_sync_bool}")
-    print("="*50)
+    print(f"Enable lip sync (converted to bool): {enable_lip_sync_bool}")
+    print("="*50 + "\n")
     
     file_size = 0
     temp_dir = None
