@@ -403,13 +403,13 @@ async def apply_lip_sync(
         if not os.path.exists(audio_path):
             raise ValueError(f"Audio file not found: {audio_path}")
         
-        # Run LatentSync with better error handling
+        # Run LatentSync - try different approaches
+        output = None
+        
+        # Approach 1: Try with file objects
         try:
+            print("\nApproach 1: Trying with file objects...")
             with open(video_path, "rb") as video_file, open(audio_path, "rb") as audio_file:
-                print("Calling LatentSync API...")
-                print(f"Model: {settings.latentsync_model}")
-                
-                # Try with explicit version
                 output = replicate.run(
                     "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04",
                     input={
@@ -417,64 +417,122 @@ async def apply_lip_sync(
                         "audio": audio_file
                     }
                 )
+                print("Success with file objects!")
                 
-                print(f"LatentSync API call successful!")
-                print(f"Output type: {type(output)}")
+        except Exception as e:
+            print(f"File objects failed: {e}")
+            
+            # Approach 2: Upload files and use URLs
+            try:
+                print("\nApproach 2: Uploading files to get URLs...")
                 
-        except Exception as api_error:
-            print(f"LatentSync API error: {api_error}")
-            print(f"Error type: {type(api_error)}")
-            
-            # Try alternative approach - using file paths instead of file objects
-            print("\nTrying alternative approach with URLs...")
-            
-            # Upload files to a temporary URL service or use local file paths
-            # For now, let's try with the Replicate file upload
-            import replicate.file
-            
-            print("Uploading video to Replicate...")
-            with open(video_path, "rb") as f:
-                video_url = replicate.file.upload(f, "video.mp4")
-            print(f"Video URL: {video_url}")
-            
-            print("Uploading audio to Replicate...")
-            with open(audio_path, "rb") as f:
-                audio_url = replicate.file.upload(f, "audio.wav")
-            print(f"Audio URL: {audio_url}")
-            
-            # Try again with URLs
-            output = replicate.run(
-                "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04",
-                input={
-                    "video": video_url,
-                    "audio": audio_url
-                }
-            )
+                # Use Replicate's file upload (different approach)
+                import base64
+                
+                # Convert to base64 data URIs (for smaller files)
+                with open(video_path, "rb") as f:
+                    video_data = f.read()
+                    # If video is too large, we need a different approach
+                    if len(video_data) > 10 * 1024 * 1024:  # 10MB limit for data URIs
+                        print("Video too large for data URI, trying direct file approach...")
+                        raise ValueError("Video too large for data URI")
+                    video_b64 = base64.b64encode(video_data).decode('utf-8')
+                    video_uri = f"data:video/mp4;base64,{video_b64}"
+                
+                with open(audio_path, "rb") as f:
+                    audio_data = f.read()
+                    audio_b64 = base64.b64encode(audio_data).decode('utf-8')
+                    audio_uri = f"data:audio/wav;base64,{audio_b64}"
+                
+                print("Created data URIs, calling LatentSync...")
+                output = replicate.run(
+                    "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04",
+                    input={
+                        "video": video_uri,
+                        "audio": audio_uri
+                    }
+                )
+                print("Success with data URIs!")
+                
+            except Exception as e:
+                print(f"Data URI approach failed: {e}")
+                
+                # Approach 3: Try uploading to file.io or similar
+                try:
+                    print("\nApproach 3: Uploading to temporary file hosting...")
+                    
+                    # Upload video to file.io
+                    with open(video_path, 'rb') as f:
+                        files = {'file': f}
+                        response = requests.post('https://file.io', files=files)
+                        if response.status_code == 200:
+                            video_url = response.json()['link']
+                            print(f"Video uploaded: {video_url}")
+                        else:
+                            raise ValueError("Failed to upload video")
+                    
+                    # Upload audio to file.io
+                    with open(audio_path, 'rb') as f:
+                        files = {'file': f}
+                        response = requests.post('https://file.io', files=files)
+                        if response.status_code == 200:
+                            audio_url = response.json()['link']
+                            print(f"Audio uploaded: {audio_url}")
+                        else:
+                            raise ValueError("Failed to upload audio")
+                    
+                    print("Calling LatentSync with URLs...")
+                    output = replicate.run(
+                        "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04",
+                        input={
+                            "video": video_url,
+                            "audio": audio_url
+                        }
+                    )
+                    print("Success with file URLs!")
+                    
+                except Exception as e:
+                    print(f"File hosting approach failed: {e}")
+                    raise ValueError(f"All approaches failed. Last error: {e}")
         
-        print(f"LatentSync output type: {type(output)}")
-        print(f"LatentSync output: {str(output)[:200]}...")  # First 200 chars
+        if output is None:
+            raise ValueError("No output received from LatentSync")
+        
+        print(f"\nLatentSync output type: {type(output)}")
+        print(f"Output preview: {str(output)[:200]}...")
         
         # Handle output
         with open(output_path, "wb") as f:
             if hasattr(output, 'read'):
-                print("Output is file-like, reading...")
+                print("Reading file-like output...")
                 content = output.read()
                 f.write(content)
                 print(f"Wrote {len(content)} bytes")
             elif isinstance(output, bytes):
-                print("Output is bytes")
+                print("Writing bytes output...")
                 f.write(output)
                 print(f"Wrote {len(output)} bytes")
             elif isinstance(output, str):
-                print(f"Output is URL: {output}")
-                response = requests.get(output)
-                print(f"Download response status: {response.status_code}")
-                response.raise_for_status()
-                f.write(response.content)
-                print(f"Downloaded {len(response.content)} bytes")
+                if output.startswith('http'):
+                    print(f"Downloading from URL: {output}")
+                    response = requests.get(output)
+                    print(f"Response status: {response.status_code}")
+                    response.raise_for_status()
+                    f.write(response.content)
+                    print(f"Downloaded {len(response.content)} bytes")
+                else:
+                    print("Output is string but not URL, trying as base64...")
+                    # Maybe it's base64 encoded
+                    import base64
+                    try:
+                        content = base64.b64decode(output)
+                        f.write(content)
+                        print(f"Decoded and wrote {len(content)} bytes")
+                    except:
+                        print(f"Not base64, writing as-is")
+                        f.write(output.encode())
             else:
-                # Try to iterate if it's a generator
-                print(f"Output is {type(output)}, trying to iterate...")
+                print(f"Unknown output type, trying iteration...")
                 content = b""
                 for chunk in output:
                     if isinstance(chunk, bytes):
@@ -486,23 +544,24 @@ async def apply_lip_sync(
         
         # Verify
         if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            print(f"LIP SYNC SUCCESS! Output: {output_path} ({os.path.getsize(output_path) / 1024 / 1024:.1f} MB)")
+            print(f"\nLIP SYNC SUCCESS! Output: {output_path} ({os.path.getsize(output_path) / 1024 / 1024:.1f} MB)")
             
             # Verify it's a valid video
             try:
                 test_video = VideoFileClip(output_path)
                 print(f"Lip synced video duration: {test_video.duration}s")
                 test_video.close()
+                return output_path
             except Exception as e:
                 print(f"Warning: Could not verify video: {e}")
-            
-            return output_path
+                # Still return if file exists
+                return output_path
         else:
             raise ValueError("Lip sync output file is empty or missing")
         
     except Exception as e:
-        print(f"LIP SYNC FAILED: {e}")
-        print(f"Full error: {traceback.format_exc()}")
+        print(f"\nLIP SYNC FAILED: {e}")
+        print(f"Error type: {type(e)}")
         raise DubbingError("lip_sync", str(e))
 
 async def process_video_with_perfect_sync(
