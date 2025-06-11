@@ -383,6 +383,23 @@ async def generate_dubbed_segment(
     except Exception as e:
         raise DubbingError("tts_generation", str(e))
 
+def upload_to_fileio(file_path: str) -> Optional[str]:
+    """Upload file to file.io and return the download URL"""
+    try:
+        with open(file_path, 'rb') as f:
+            files = {'file': (os.path.basename(file_path), f)}
+            response = requests.post('https://file.io', files=files)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    return data['link']
+                else:
+                    print(f"file.io upload failed: {data}")
+    except Exception as e:
+        print(f"file.io upload failed: {e}")
+    return None
+
 async def apply_lip_sync(
     video_path: str,
     audio_path: str,
@@ -397,451 +414,62 @@ async def apply_lip_sync(
         print(f"Video: {video_path} ({os.path.getsize(video_path) / 1024 / 1024:.1f} MB)")
         print(f"Audio: {audio_path} ({os.path.getsize(audio_path) / 1024 / 1024:.1f} MB)")
         
-        # Check if files exist and are readable
-        if not os.path.exists(video_path):
-            raise ValueError(f"Video file not found: {video_path}")
-        if not os.path.exists(audio_path):
-            raise ValueError(f"Audio file not found: {audio_path}")
+        # Upload files to file.io for URL access
+        print("\nUploading files to temporary hosting...")
         
-        # Run LatentSync - try different approaches
-        output = None
+        video_url = upload_to_fileio(video_path)
+        if not video_url:
+            raise ValueError("Failed to upload video file")
+        print(f"Video uploaded: {video_url}")
         
-        # Approach 1: Try with file objects
-        try:
-            print("\nApproach 1: Trying with file objects...")
-            with open(video_path, "rb") as video_file, open(audio_path, "rb") as audio_file:
-                output = replicate.run(
-                    "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04",
-                    input={
-                        "video": video_file,
-                        "audio": audio_file
-                    }
-                )
-                print("Success with file objects!")
-                
-        except Exception as e:
-            print(f"File objects failed: {e}")
-            
-            # Approach 2: Upload files and use URLs
-            try:
-                print("\nApproach 2: Uploading files to get URLs...")
-                
-                # Use Replicate's file upload (different approach)
-                import base64
-                
-                # Convert to base64 data URIs (for smaller files)
-                with open(video_path, "rb") as f:
-                    video_data = f.read()
-                    # If video is too large, we need a different approach
-                    if len(video_data) > 10 * 1024 * 1024:  # 10MB limit for data URIs
-                        print("Video too large for data URI, trying direct file approach...")
-                        raise ValueError("Video too large for data URI")
-                    video_b64 = base64.b64encode(video_data).decode('utf-8')
-                    video_uri = f"data:video/mp4;base64,{video_b64}"
-                
-                with open(audio_path, "rb") as f:
-                    audio_data = f.read()
-                    audio_b64 = base64.b64encode(audio_data).decode('utf-8')
-                    audio_uri = f"data:audio/wav;base64,{audio_b64}"
-                
-                print("Created data URIs, calling LatentSync...")
-                output = replicate.run(
-                    "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04",
-                    input={
-                        "video": video_uri,
-                        "audio": audio_uri
-                    }
-                )
-                print("Success with data URIs!")
-                
-            except Exception as e:
-                print(f"Data URI approach failed: {e}")
-                
-                # Approach 3: Try uploading to file.io or similar
-                try:
-                    print("\nApproach 3: Uploading to temporary file hosting...")
-                    
-                    # Upload video to file.io
-                    with open(video_path, 'rb') as f:
-                        files = {'file': f}
-                        response = requests.post('https://file.io', files=files)
-                        if response.status_code == 200:
-                            video_url = response.json()['link']
-                            print(f"Video uploaded: {video_url}")
-                        else:
-                            raise ValueError("Failed to upload video")
-                    
-                    # Upload audio to file.io
-                    with open(audio_path, 'rb') as f:
-                        files = {'file': f}
-                        response = requests.post('https://file.io', files=files)
-                        if response.status_code == 200:
-                            audio_url = response.json()['link']
-                            print(f"Audio uploaded: {audio_url}")
-                        else:
-                            raise ValueError("Failed to upload audio")
-                    
-                    print("Calling LatentSync with URLs...")
-                    output = replicate.run(
-                        "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04",
-                        input={
-                            "video": video_url,
-                            "audio": audio_url
-                        }
-                    )
-                    print("Success with file URLs!")
-                    
-                except Exception as e:
-                    print(f"File hosting approach failed: {e}")
-                    raise ValueError(f"All approaches failed. Last error: {e}")
+        audio_url = upload_to_fileio(audio_path)
+        if not audio_url:
+            raise ValueError("Failed to upload audio file")
+        print(f"Audio uploaded: {audio_url}")
         
-        if output is None:
-            raise ValueError("No output received from LatentSync")
+        # Run LatentSync with URLs
+        print("\nRunning LatentSync...")
+        output = replicate.run(
+            "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04",
+            input={
+                "video": video_url,
+                "audio": audio_url
+            }
+        )
         
-        print(f"\nLatentSync output type: {type(output)}")
-        print(f"Output preview: {str(output)[:200]}...")
+        print(f"LatentSync completed. Output type: {type(output)}")
         
-        # Handle output
-        with open(output_path, "wb") as f:
-            if hasattr(output, 'read'):
-                print("Reading file-like output...")
-                content = output.read()
-                f.write(content)
-                print(f"Wrote {len(content)} bytes")
-            elif isinstance(output, bytes):
-                print("Writing bytes output...")
-                f.write(output)
-                print(f"Wrote {len(output)} bytes")
-            elif isinstance(output, str):
-                if output.startswith('http'):
-                    print(f"Downloading from URL: {output}")
-                    response = requests.get(output)
-                    print(f"Response status: {response.status_code}")
-                    response.raise_for_status()
-                    f.write(response.content)
-                    print(f"Downloaded {len(response.content)} bytes")
-                else:
-                    print("Output is string but not URL, trying as base64...")
-                    # Maybe it's base64 encoded
-                    import base64
-                    try:
-                        content = base64.b64decode(output)
-                        f.write(content)
-                        print(f"Decoded and wrote {len(content)} bytes")
-                    except:
-                        print(f"Not base64, writing as-is")
-                        f.write(output.encode())
-            else:
-                print(f"Unknown output type, trying iteration...")
-                content = b""
-                for chunk in output:
-                    if isinstance(chunk, bytes):
-                        content += chunk
-                    elif isinstance(chunk, str):
-                        content += chunk.encode()
-                f.write(content)
-                print(f"Wrote {len(content)} bytes from iterator")
+        # Download the result
+        if hasattr(output, 'read'):
+            with open(output_path, 'wb') as f:
+                f.write(output.read())
+        elif isinstance(output, str) and output.startswith('http'):
+            response = requests.get(output)
+            with open(output_path, 'wb') as f:
+                f.write(response.content)
+        else:
+            raise ValueError(f"Unexpected output type: {type(output)}")
         
-        # Verify
         if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             print(f"\nLIP SYNC SUCCESS! Output: {output_path} ({os.path.getsize(output_path) / 1024 / 1024:.1f} MB)")
-            
-            # Verify it's a valid video
-            try:
-                test_video = VideoFileClip(output_path)
-                print(f"Lip synced video duration: {test_video.duration}s")
-                test_video.close()
-                return output_path
-            except Exception as e:
-                print(f"Warning: Could not verify video: {e}")
-                # Still return if file exists
-                return output_path
+            return output_path
         else:
             raise ValueError("Lip sync output file is empty or missing")
         
     except Exception as e:
         print(f"\nLIP SYNC FAILED: {e}")
-        print(f"Error type: {type(e)}")
         raise DubbingError("lip_sync", str(e))
 
 async def process_video_with_perfect_sync(
     job_id: str,
     file_path: str,
     filename: str,
-    target_language: str,
-    enable_lip_sync: bool = False
+    target_language: str
 ):
     temp_dir = os.path.dirname(file_path)
     
     try:
-        update_job_status(job_id, "creating_final_video", 95)
-        
-        output_filename = f"{os.path.splitext(filename)[0]}_dubbed_{target_language}_perfect_sync.mp4"
-        output_path = os.path.join(temp_dir, output_filename)
-        
-        final_audio_clip = AudioFileClip(temp_final_audio)
-        final_video = video.set_audio(final_audio_clip)
-        
-        final_video.write_videofile(
-            output_path,
-            codec="libx264",
-            audio_codec="aac",
-            logger=None,
-            temp_audiofile=os.path.join(temp_dir, "temp_audio.m4a")
-        )
-        
-        video.close()
-        final_audio_clip.close()
-        final_video.close()
-        for seg in audio_segments:
-            try:
-                seg.close()
-            except:
-                pass
-        
-        # Apply lip sync if enabled
-        if enable_lip_sync:
-            print("\n" + "="*50)
-            print("LIP SYNC ENABLED - STARTING LIP SYNC PROCESS")
-            print("="*50)
-            update_job_status(job_id, "applying_lip_sync", 97)
-            
-            lip_sync_output = os.path.join(temp_dir, f"{os.path.splitext(filename)[0]}_dubbed_{target_language}_lip_synced.mp4")
-            
-            try:
-                await apply_lip_sync(
-                    video_path=file_path,  # Original video
-                    audio_path=temp_final_audio,  # Dubbed audio WAV file
-                    output_path=lip_sync_output
-                )
-                
-                # Use lip-synced version as final output
-                if os.path.exists(lip_sync_output):
-                    output_path = lip_sync_output
-                    print("LIP SYNC COMPLETE - Using lip-synced video as final output")
-                else:
-                    print("LIP SYNC FAILED - No output file, using regular dubbed video")
-                
-            except Exception as e:
-                print(f"LIP SYNC ERROR: {e}")
-                print("Continuing with non-lip-synced video")
-        else:
-            print("\nLIP SYNC DISABLED - Skipping lip sync")
-        
-        update_job_status(job_id, "completed", 100, result=output_path)
-        
-    except DubbingError as e:
-        error_msg = f"{e.stage} failed: {e.detail}"
-        update_job_status(job_id, "failed", error=error_msg)
-    except Exception as e:
-        error_msg = f"Unexpected error: {str(e)}\n{traceback.format_exc()}"
-        update_job_status(job_id, "failed", error=error_msg)
-
-@app.get("/")
-def read_root():
-    return {
-        "message": "Polydub v5.0 - Working Version",
-        "features": [
-            "WhisperX word-level transcription",
-            "GPT-4o smart translation",
-            "XTTS voice cloning",
-            "Perfect synchronization",
-            "LatentSync lip synchronization"
-        ],
-        "endpoints": {
-            "/upload": "POST - Upload video for dubbing",
-            "/status/{job_id}": "GET - Check job status",
-            "/download/{job_id}": "GET - Download completed video",
-            "/languages": "GET - List supported languages",
-            "/formats": "GET - List supported video formats",
-            "/test-latentsync": "GET - Test LatentSync model"
-        }
-    }
-
-@app.get("/languages")
-def get_languages():
-    return {"supported_languages": SUPPORTED_LANGUAGES}
-
-@app.get("/formats")
-def get_formats():
-    return {"supported_formats": SUPPORTED_VIDEO_FORMATS}
-
-@app.get("/test-latentsync")
-async def test_latentsync_endpoint():
-    """Test if LatentSync model is working"""
-    
-    results = {
-        "demo_test": None,
-        "model_info": None,
-        "error_details": None
-    }
-    
-    # Test 1: Try with demo URLs
-    try:
-        output = replicate.run(
-            "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04",
-            input={
-                "video": "https://replicate.delivery/pbxt/MGZuEgzJZh6avv1LDEMppJZXLP9avGXqRuH7iAb7MBAz0Wu4/demo2_video.mp4",
-                "audio": "https://replicate.delivery/pbxt/MGZuENopzAwWcpFsZ7SwoZ7itP4gvqasswPeEJwbRHTxtkwF/demo2_audio.wav"
-            }
-        )
-        results["demo_test"] = {
-            "success": True,
-            "output_type": str(type(output)),
-            "output_preview": str(output)[:100] if output else None
-        }
-    except Exception as e:
-        results["demo_test"] = {
-            "success": False,
-            "error": str(e),
-            "error_type": str(type(e))
-        }
-        # Get more error details
-        if hasattr(e, '__cause__') and e.__cause__:
-            results["error_details"] = {
-                "cause": str(e.__cause__),
-                "cause_type": str(type(e.__cause__))
-            }
-    
-    # Test 2: Check model info
-    try:
-        client = replicate.Client(api_token=settings.replicate_api_token)
-        model = client.models.get("bytedance/latentsync")
-        results["model_info"] = {
-            "found": True,
-            "name": model.name,
-            "description": model.description[:100] if model.description else None
-        }
-    except Exception as e:
-        results["model_info"] = {
-            "found": False,
-            "error": str(e)
-        }
-    
-    return results
-
-@app.post("/upload")
-async def upload_video(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    target_language: str = Form(...),
-    enable_lip_sync: str = Form("false")  # Accept as string from Postman
-):
-    print("\n" + "="*50)
-    print("NEW UPLOAD REQUEST")
-    print(f"File: {file.filename}")
-    print(f"Target language: {target_language}")
-    print(f"Enable lip sync (raw string): '{enable_lip_sync}'")
-    
-    # Convert string to boolean
-    enable_lip_sync_bool = enable_lip_sync.lower() in ["true", "1", "yes", "on"]
-    print(f"Enable lip sync (converted to bool): {enable_lip_sync_bool}")
-    print("="*50 + "\n")
-    
-    file_size = 0
-    temp_dir = None
-    
-    try:
-        temp_file = tempfile.SpooledTemporaryFile(max_size=1024*1024)
-        while chunk := await file.read(1024*1024):
-            file_size += len(chunk)
-            temp_file.write(chunk)
-        temp_file.seek(0)
-        
-        file_ext = os.path.splitext(file.filename)[1].lower()
-        if file_ext not in SUPPORTED_VIDEO_FORMATS:
-            raise HTTPException(status_code=400, detail=f"Unsupported format")
-        
-        if target_language not in SUPPORTED_LANGUAGES:
-            raise HTTPException(status_code=400, detail=f"Unsupported language")
-        
-        if file_size > settings.max_file_size_mb * 1024 * 1024:
-            raise HTTPException(status_code=400, detail=f"File too large")
-        
-        job_id = str(uuid.uuid4())
-        update_job_status(job_id, "uploading", 0)
-        
-        temp_dir = tempfile.mkdtemp(prefix=f"polydub_{job_id}_")
-        file_path = os.path.join(temp_dir, file.filename)
-        
-        with open(file_path, 'wb') as f:
-            temp_file.seek(0)
-            shutil.copyfileobj(temp_file, f)
-        temp_file.close()
-        
-        background_tasks.add_task(
-            process_video_with_perfect_sync,
-            job_id,
-            file_path,
-            file.filename,
-            target_language,
-            enable_lip_sync_bool  # Pass the boolean value
-        )
-        
-        return {
-            "job_id": job_id,
-            "message": "Video processing started with perfect synchronization",
-            "features": {
-                "transcription": "WhisperX (word-level)",
-                "translation": "GPT-4o (smart)",
-                "voice": "XTTS (cloned)",
-                "sync": "Perfect word-level",
-                "lip_sync": "ENABLED" if enable_lip_sync_bool else "DISABLED"
-            },
-            "status_url": f"/status/{job_id}",
-            "download_url": f"/download/{job_id}"
-        }
-        
-    except HTTPException:
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        raise
-    except Exception as e:
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/status/{job_id}")
-def get_status(job_id: str):
-    if job_id not in job_status:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    return job_status[job_id]
-
-@app.get("/download/{job_id}")
-def download_video(job_id: str):
-    if job_id not in job_status:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    status = job_status[job_id]
-    
-    if status["status"] != "completed":
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Job not completed. Current status: {status['status']}"
-        )
-    
-    if not status["result"] or not os.path.exists(status["result"]):
-        raise HTTPException(status_code=404, detail="Output file not found")
-    
-    return FileResponse(
-        status["result"], 
-        media_type="video/mp4",
-        filename=os.path.basename(status["result"])
-    )
-
-@app.get("/health")
-def health_check():
-    return {
-        "status": "healthy",
-        "active_jobs": len([j for j in job_status.values() if j["status"] not in ["completed", "failed"]])
-    }
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8080))
-    print(f"Starting server on port {port}")
-    uvicorn.run(app, host="0.0.0.0", port=port)extracting_audio", 10)
+        update_job_status(job_id, "extracting_audio", 10)
         
         audio_path = os.path.join(temp_dir, "audio.wav")
         video = VideoFileClip(file_path)
@@ -907,7 +535,7 @@ if __name__ == "__main__":
             segment = item["segment"]
             translation = item["translation"]
             
-            progress = 55 + (30 * i / len(translated_segments))
+            progress = 55 + (25 * i / len(translated_segments))
             update_job_status(job_id, f"dubbing_segment_{i+1}_of_{len(translated_segments)}", int(progress))
             
             segment_output_path = os.path.join(temp_dir, f"segment_{i:04d}.wav")
@@ -939,7 +567,7 @@ if __name__ == "__main__":
         if not audio_segments:
             raise DubbingError("segment_generation", "No audio segments were generated")
         
-        update_job_status(job_id, "creating_synchronized_audio", 90)
+        update_job_status(job_id, "creating_synchronized_audio", 80)
         
         print(f"Total segments to combine: {len(audio_segments)}")
         for i, seg in enumerate(audio_segments):
@@ -980,4 +608,200 @@ if __name__ == "__main__":
             print(f"Final audio duration: {audio_check.duration}s")
             audio_check.close()
         
-        update_job_status(job_id, "
+        update_job_status(job_id, "creating_temporary_video", 85)
+        
+        # Create temporary dubbed video first
+        temp_dubbed_path = os.path.join(temp_dir, "temp_dubbed.mp4")
+        
+        final_audio_clip = AudioFileClip(temp_final_audio)
+        final_video = video.set_audio(final_audio_clip)
+        
+        final_video.write_videofile(
+            temp_dubbed_path,
+            codec="libx264",
+            audio_codec="aac",
+            logger=None,
+            temp_audiofile=os.path.join(temp_dir, "temp_audio.m4a")
+        )
+        
+        video.close()
+        final_audio_clip.close()
+        final_video.close()
+        for seg in audio_segments:
+            try:
+                seg.close()
+            except:
+                pass
+        
+        # Apply lip sync
+        update_job_status(job_id, "applying_lip_sync", 90)
+        
+        output_filename = f"{os.path.splitext(filename)[0]}_dubbed_{target_language}_lip_synced.mp4"
+        output_path = os.path.join(temp_dir, output_filename)
+        
+        try:
+            await apply_lip_sync(
+                video_path=file_path,  # Original video
+                audio_path=temp_final_audio,  # Dubbed audio
+                output_path=output_path
+            )
+            print("LIP SYNC COMPLETE")
+        except Exception as e:
+            print(f"LIP SYNC ERROR: {e}")
+            print("Using non-lip-synced video as fallback")
+            # Use the dubbed video without lip sync as fallback
+            shutil.move(temp_dubbed_path, output_path)
+        
+        update_job_status(job_id, "completed", 100, result=output_path)
+        
+    except DubbingError as e:
+        error_msg = f"{e.stage} failed: {e.detail}"
+        update_job_status(job_id, "failed", error=error_msg)
+    except Exception as e:
+        error_msg = f"Unexpected error: {str(e)}\n{traceback.format_exc()}"
+        update_job_status(job_id, "failed", error=error_msg)
+
+@app.get("/")
+def read_root():
+    return {
+        "message": "Polydub v5.0 - With Integrated Lip Sync",
+        "features": [
+            "WhisperX word-level transcription",
+            "GPT-4o smart translation",
+            "XTTS voice cloning",
+            "Perfect synchronization",
+            "LatentSync lip synchronization (automatic)"
+        ],
+        "endpoints": {
+            "/upload": "POST - Upload video for dubbing",
+            "/status/{job_id}": "GET - Check job status",
+            "/download/{job_id}": "GET - Download completed video",
+            "/languages": "GET - List supported languages",
+            "/formats": "GET - List supported video formats"
+        }
+    }
+
+@app.get("/languages")
+def get_languages():
+    return {"supported_languages": SUPPORTED_LANGUAGES}
+
+@app.get("/formats")
+def get_formats():
+    return {"supported_formats": SUPPORTED_VIDEO_FORMATS}
+
+@app.post("/upload")
+async def upload_video(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    target_language: str = Form(...)
+):
+    print("\n" + "="*50)
+    print("NEW UPLOAD REQUEST")
+    print(f"File: {file.filename}")
+    print(f"Target language: {target_language}")
+    print("Lip sync: ENABLED (automatic)")
+    print("="*50 + "\n")
+    
+    file_size = 0
+    temp_dir = None
+    
+    try:
+        temp_file = tempfile.SpooledTemporaryFile(max_size=1024*1024)
+        while chunk := await file.read(1024*1024):
+            file_size += len(chunk)
+            temp_file.write(chunk)
+        temp_file.seek(0)
+        
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        if file_ext not in SUPPORTED_VIDEO_FORMATS:
+            raise HTTPException(status_code=400, detail=f"Unsupported format")
+        
+        if target_language not in SUPPORTED_LANGUAGES:
+            raise HTTPException(status_code=400, detail=f"Unsupported language")
+        
+        if file_size > settings.max_file_size_mb * 1024 * 1024:
+            raise HTTPException(status_code=400, detail=f"File too large")
+        
+        job_id = str(uuid.uuid4())
+        update_job_status(job_id, "uploading", 0)
+        
+        temp_dir = tempfile.mkdtemp(prefix=f"polydub_{job_id}_")
+        file_path = os.path.join(temp_dir, file.filename)
+        
+        with open(file_path, 'wb') as f:
+            temp_file.seek(0)
+            shutil.copyfileobj(temp_file, f)
+        temp_file.close()
+        
+        background_tasks.add_task(
+            process_video_with_perfect_sync,
+            job_id,
+            file_path,
+            file.filename,
+            target_language
+        )
+        
+        return {
+            "job_id": job_id,
+            "message": "Video processing started with automatic lip sync",
+            "features": {
+                "transcription": "WhisperX (word-level)",
+                "translation": "GPT-4o (smart)",
+                "voice": "XTTS (cloned)",
+                "sync": "Perfect word-level",
+                "lip_sync": "ENABLED (automatic)"
+            },
+            "status_url": f"/status/{job_id}",
+            "download_url": f"/download/{job_id}"
+        }
+        
+    except HTTPException:
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        raise
+    except Exception as e:
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/status/{job_id}")
+def get_status(job_id: str):
+    if job_id not in job_status:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return job_status[job_id]
+
+@app.get("/download/{job_id}")
+def download_video(job_id: str):
+    if job_id not in job_status:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    status = job_status[job_id]
+    
+    if status["status"] != "completed":
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Job not completed. Current status: {status['status']}"
+        )
+    
+    if not status["result"] or not os.path.exists(status["result"]):
+        raise HTTPException(status_code=404, detail="Output file not found")
+    
+    return FileResponse(
+        status["result"], 
+        media_type="video/mp4",
+        filename=os.path.basename(status["result"])
+    )
+
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy",
+        "active_jobs": len([j for j in job_status.values() if j["status"] not in ["completed", "failed"]])
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8080))
+    print(f"Starting server on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
