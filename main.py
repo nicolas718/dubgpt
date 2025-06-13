@@ -91,20 +91,26 @@ def cleanup_temp_files():
 cleanup_thread = threading.Thread(target=cleanup_temp_files, daemon=True)
 cleanup_thread.start()
 
-def store_temp_file(file_path: str, content_type: str = "video/mp4") -> str:
-    """Store a file temporarily and return its URL"""
-    file_id = str(uuid.uuid4())
-    temp_files[file_id] = {
-        'path': file_path,
-        'content_type': content_type,
-        'timestamp': time.time()
-    }
-    # Return the URL that Replicate can access - MUST include https://
-    base_url = os.getenv("APP_BASE_URL", "https://polydub-production.up.railway.app")
-    # Ensure base_url has https://
-    if not base_url.startswith("http"):
-        base_url = f"https://{base_url}"
-    return f"{base_url}/temp-files/{file_id}"
+def upload_to_tmpfiles(file_path: str) -> Optional[str]:
+    """Upload file to tmpfiles.org for temporary hosting"""
+    try:
+        with open(file_path, 'rb') as f:
+            files = {'file': f}
+            response = requests.post('https://tmpfiles.org/api/v1/upload', files=files)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('status') == 'success':
+                    # Convert to direct download URL
+                    url = data['data']['url']
+                    # tmpfiles.org returns URLs like https://tmpfiles.org/1234567/file.mp4
+                    # We need to convert to https://tmpfiles.org/dl/1234567/file.mp4
+                    direct_url = url.replace('tmpfiles.org/', 'tmpfiles.org/dl/')
+                    return direct_url
+                    
+    except Exception as e:
+        print(f"tmpfiles upload failed: {e}")
+    return None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -314,25 +320,35 @@ Context: {context[-200:] if context else 'Start of video'}
 Return ONLY the translated text."""
 
     try:
+        print(f"\nTranslating to {target_language}: '{segment.text[:50]}...'")
+        
         output = replicate.run(
             settings.gpt4o_model,
             input={
                 "prompt": prompt,
-                "max_tokens": 150,
                 "temperature": 0.3,
                 "system_prompt": "You are a professional translator specializing in video dubbing. Create translations that sound natural when spoken, matching the original timing as closely as possible."
             }
         )
         
+        if output is None:
+            print(f"WARNING: GPT-4o returned None")
+            return segment.text
+            
         translated_text = ''.join(output).strip()
         
-        print(f"Segment ({segment.duration:.1f}s): '{segment.text[:30]}...' -> '{translated_text[:30]}...' ({len(translated_text)} chars)")
+        if not translated_text:
+            print(f"WARNING: GPT-4o returned empty translation")
+            return segment.text
+            
+        print(f"Translated: '{segment.text[:30]}...' -> '{translated_text[:30]}...' ({len(translated_text)} chars)")
         
         return translated_text
         
     except Exception as e:
-        print(f"GPT-4o translation failed: {e}, using fallback")
-        return segment.text[:max_chars]
+        print(f"ERROR: GPT-4o translation failed: {e}")
+        print(f"Using original text as fallback")
+        return segment.text
 
 async def generate_dubbed_segment(
     segment: TimedSegment,
@@ -441,16 +457,20 @@ async def apply_lip_sync(
         print(f"Video: {video_path} ({os.path.getsize(video_path) / 1024 / 1024:.1f} MB)")
         print(f"Audio: {audio_path} ({os.path.getsize(audio_path) / 1024 / 1024:.1f} MB)")
         
-        # Store files temporarily and get URLs
-        print("\nCreating temporary URLs...")
+        # Upload to tmpfiles.org instead of using local server
+        print("\nUploading to tmpfiles.org...")
         
-        video_url = store_temp_file(video_path, "video/mp4")
+        video_url = upload_to_tmpfiles(video_path)
+        if not video_url:
+            raise ValueError("Failed to upload video")
         print(f"Video URL: {video_url}")
         
-        audio_url = store_temp_file(audio_path, "audio/wav")
+        audio_url = upload_to_tmpfiles(audio_path)
+        if not audio_url:
+            raise ValueError("Failed to upload audio")
         print(f"Audio URL: {audio_url}")
         
-        # Run Kling Lip Sync with our server URLs
+        # Run Kling Lip Sync
         print("\nRunning Kling Lip Sync...")
         output = replicate.run(
             "kwaivgi/kling-lip-sync",
@@ -656,7 +676,7 @@ async def process_video_with_perfect_sync(
             except:
                 pass
         
-        # Apply lip sync
+        # Apply lip sync 
         update_job_status(job_id, "applying_lip_sync", 90)
         
         output_filename = f"{os.path.splitext(filename)[0]}_dubbed_{target_language}_lip_synced.mp4"
