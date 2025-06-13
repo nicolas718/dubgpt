@@ -636,21 +636,18 @@ async def process_video_with_perfect_sync(
         # Apply lip sync
         update_job_status(job_id, "applying_lip_sync", 90)
         
-        output_filename = f"{os.path.splitext(filename)[0]}_dubbed_{target_language}_lip_synced.mp4"
+        output_filename = f"{os.path.splitext(filename)[0]}_dubbed_{target_language}.mp4"
         output_path = os.path.join(temp_dir, output_filename)
         
-        try:
-            await apply_lip_sync(
-                video_path=file_path,  # Original video
-                audio_path=temp_final_audio,  # Dubbed audio
-                output_path=output_path
-            )
-            print("LIP SYNC COMPLETE")
-        except Exception as e:
-            print(f"LIP SYNC ERROR: {e}")
-            print("Using non-lip-synced video as fallback")
-            # Use the dubbed video without lip sync as fallback
-            shutil.move(temp_dubbed_path, output_path)
+        # For now, skip lip sync and use the dubbed video directly
+        lip_sync_result = await apply_lip_sync(
+            video_path=file_path,
+            audio_path=temp_final_audio,
+            output_path=output_path
+        )
+        
+        # Just use the dubbed video
+        shutil.move(temp_dubbed_path, output_path)
         
         update_job_status(job_id, "completed", 100, result=output_path)
         
@@ -664,13 +661,12 @@ async def process_video_with_perfect_sync(
 @app.get("/")
 def read_root():
     return {
-        "message": "Polydub v5.0 - With Integrated Lip Sync",
+        "message": "Polydub v5.0 - Video Dubbing Service",
         "features": [
             "WhisperX word-level transcription",
             "GPT-4o smart translation",
             "XTTS voice cloning",
-            "Perfect synchronization",
-            "Kling Lip Sync (automatic)"
+            "Perfect synchronization"
         ],
         "endpoints": {
             "/upload": "POST - Upload video for dubbing",
@@ -743,13 +739,12 @@ async def upload_video(
         
         return {
             "job_id": job_id,
-            "message": "Video processing started with automatic lip sync",
+            "message": "Video processing started",
             "features": {
                 "transcription": "WhisperX (word-level)",
                 "translation": "GPT-4o (smart)",
                 "voice": "XTTS (cloned)",
-                "sync": "Perfect word-level",
-                "lip_sync": "ENABLED (automatic)"
+                "sync": "Perfect word-level"
             },
             "status_url": f"/status/{job_id}",
             "download_url": f"/download/{job_id}"
