@@ -663,17 +663,17 @@ async def process_video_with_perfect_sync(
         output_filename = f"{os.path.splitext(filename)[0]}_dubbed_{target_language}_lip_synced.mp4"
         output_path = os.path.join(temp_dir, output_filename)
         
-        # Try lip sync with our temp file server
-        lip_sync_result = await apply_lip_sync(
-            video_path=file_path,  # Original video
-            audio_path=temp_final_audio,  # Dubbed audio
-            output_path=output_path
-        )
-        
-        if lip_sync_result:
-            print("LIP SYNC COMPLETE - Using lip-synced video")
-        else:
-            print("LIP SYNC FAILED - Using dubbed video without lip sync")
+        try:
+            await apply_lip_sync(
+                video_path=file_path,  # Original video
+                audio_path=temp_final_audio,  # Dubbed audio
+                output_path=output_path
+            )
+            print("LIP SYNC COMPLETE")
+        except Exception as e:
+            print(f"LIP SYNC ERROR: {e}")
+            print("Using non-lip-synced video as fallback")
+            # Use the dubbed video without lip sync as fallback
             shutil.move(temp_dubbed_path, output_path)
         
         update_job_status(job_id, "completed", 100, result=output_path)
