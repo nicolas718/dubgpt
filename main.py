@@ -471,7 +471,7 @@ async def apply_lip_sync(
             raise ValueError(f"Unexpected output type: {type(output)}")
         
         if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            print(f"\nLIP SYNC SUCCESS! Output: {output_path} ({os.path.getsize(output_path) / 1024 / 1024:.1f} MB}")
+            print(f"\nLIP SYNC SUCCESS! Output: {output_path} ({os.path.getsize(output_path) / 1024 / 1024:.1f} MB)")
             return output_path
         else:
             raise ValueError("Lip sync output file is empty or missing")
