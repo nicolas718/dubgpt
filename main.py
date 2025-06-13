@@ -99,8 +99,11 @@ def store_temp_file(file_path: str, content_type: str = "video/mp4") -> str:
         'content_type': content_type,
         'timestamp': time.time()
     }
-    # Return the URL that Replicate can access
+    # Return the URL that Replicate can access - MUST include https://
     base_url = os.getenv("APP_BASE_URL", "https://polydub-production.up.railway.app")
+    # Ensure base_url has https://
+    if not base_url.startswith("http"):
+        base_url = f"https://{base_url}"
     return f"{base_url}/temp-files/{file_id}"
 
 @asynccontextmanager
