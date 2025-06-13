@@ -5,6 +5,8 @@ import shutil
 import tempfile
 import traceback
 import subprocess
+import threading
+import time
 from typing import Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -19,6 +21,9 @@ from moviepy.audio.AudioClip import AudioClip
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Global storage for temporary files
+temp_files: Dict[str, Dict] = {}
 
 @dataclass
 class WordTiming:
@@ -383,22 +388,41 @@ async def generate_dubbed_segment(
     except Exception as e:
         raise DubbingError("tts_generation", str(e))
 
-def upload_to_fileio(file_path: str) -> Optional[str]:
-    """Upload file to file.io and return the download URL"""
-    try:
-        with open(file_path, 'rb') as f:
-            files = {'file': (os.path.basename(file_path), f)}
-            response = requests.post('https://file.io', files=files)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('success'):
-                    return data['link']
-                else:
-                    print(f"file.io upload failed: {data}")
-    except Exception as e:
-        print(f"file.io upload failed: {e}")
-    return None
+def cleanup_temp_files():
+    """Background thread to cleanup expired temporary files"""
+    while True:
+        time.sleep(60)  # Check every minute
+        current_time = time.time()
+        expired_files = []
+        
+        for file_id, file_info in temp_files.items():
+            if current_time - file_info['timestamp'] > 1800:  # 30 minutes
+                expired_files.append(file_id)
+                try:
+                    if os.path.exists(file_info['path']):
+                        os.remove(file_info['path'])
+                    print(f"Cleaned up expired file: {file_id}")
+                except Exception as e:
+                    print(f"Error cleaning up file {file_id}: {e}")
+        
+        for file_id in expired_files:
+            del temp_files[file_id]
+
+# Start cleanup thread
+cleanup_thread = threading.Thread(target=cleanup_temp_files, daemon=True)
+cleanup_thread.start()
+
+def store_temp_file(file_path: str, content_type: str = "video/mp4") -> str:
+    """Store a file temporarily and return its URL"""
+    file_id = str(uuid.uuid4())
+    temp_files[file_id] = {
+        'path': file_path,
+        'content_type': content_type,
+        'timestamp': time.time()
+    }
+    # Return the URL that Replicate can access
+    base_url = os.getenv("APP_BASE_URL", "https://polydub-production.up.railway.app")
+    return f"{base_url}/temp-files/{file_id}"
 
 async def apply_lip_sync(
     video_path: str,
@@ -636,18 +660,21 @@ async def process_video_with_perfect_sync(
         # Apply lip sync
         update_job_status(job_id, "applying_lip_sync", 90)
         
-        output_filename = f"{os.path.splitext(filename)[0]}_dubbed_{target_language}.mp4"
+        output_filename = f"{os.path.splitext(filename)[0]}_dubbed_{target_language}_lip_synced.mp4"
         output_path = os.path.join(temp_dir, output_filename)
         
-        # For now, skip lip sync and use the dubbed video directly
+        # Try lip sync with our temp file server
         lip_sync_result = await apply_lip_sync(
-            video_path=file_path,
-            audio_path=temp_final_audio,
+            video_path=file_path,  # Original video
+            audio_path=temp_final_audio,  # Dubbed audio
             output_path=output_path
         )
         
-        # Just use the dubbed video
-        shutil.move(temp_dubbed_path, output_path)
+        if lip_sync_result:
+            print("LIP SYNC COMPLETE - Using lip-synced video")
+        else:
+            print("LIP SYNC FAILED - Using dubbed video without lip sync")
+            shutil.move(temp_dubbed_path, output_path)
         
         update_job_status(job_id, "completed", 100, result=output_path)
         
@@ -680,6 +707,29 @@ def read_root():
 @app.get("/languages")
 def get_languages():
     return {"supported_languages": SUPPORTED_LANGUAGES}
+
+@app.get("/temp-files/{file_id}")
+async def serve_temp_file(file_id: str):
+    """Serve temporary files for Replicate to download"""
+    if file_id not in temp_files:
+        raise HTTPException(status_code=404, detail="File not found or expired")
+    
+    file_info = temp_files[file_id]
+    file_path = file_info['path']
+    
+    if not os.path.exists(file_path):
+        # Clean up the reference if file doesn't exist
+        del temp_files[file_id]
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    # Update timestamp to prevent deletion while being used
+    file_info['timestamp'] = time.time()
+    
+    return FileResponse(
+        file_path,
+        media_type=file_info['content_type'],
+        filename=os.path.basename(file_path)
+    )
 
 @app.get("/formats")
 def get_formats():
