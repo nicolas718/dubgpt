@@ -67,6 +67,42 @@ class DubbingError(Exception):
         self.detail = detail
         super().__init__(f"{stage}: {detail}")
 
+def cleanup_temp_files():
+    """Background thread to cleanup expired temporary files"""
+    while True:
+        time.sleep(60)  # Check every minute
+        current_time = time.time()
+        expired_files = []
+        
+        for file_id, file_info in temp_files.items():
+            if current_time - file_info['timestamp'] > 1800:  # 30 minutes
+                expired_files.append(file_id)
+                try:
+                    if os.path.exists(file_info['path']):
+                        os.remove(file_info['path'])
+                    print(f"Cleaned up expired file: {file_id}")
+                except Exception as e:
+                    print(f"Error cleaning up file {file_id}: {e}")
+        
+        for file_id in expired_files:
+            del temp_files[file_id]
+
+# Start cleanup thread
+cleanup_thread = threading.Thread(target=cleanup_temp_files, daemon=True)
+cleanup_thread.start()
+
+def store_temp_file(file_path: str, content_type: str = "video/mp4") -> str:
+    """Store a file temporarily and return its URL"""
+    file_id = str(uuid.uuid4())
+    temp_files[file_id] = {
+        'path': file_path,
+        'content_type': content_type,
+        'timestamp': time.time()
+    }
+    # Return the URL that Replicate can access
+    base_url = os.getenv("APP_BASE_URL", "https://polydub-production.up.railway.app")
+    return f"{base_url}/temp-files/{file_id}"
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Polydub backend starting up...")
@@ -388,80 +424,40 @@ async def generate_dubbed_segment(
     except Exception as e:
         raise DubbingError("tts_generation", str(e))
 
-def cleanup_temp_files():
-    """Background thread to cleanup expired temporary files"""
-    while True:
-        time.sleep(60)  # Check every minute
-        current_time = time.time()
-        expired_files = []
-        
-        for file_id, file_info in temp_files.items():
-            if current_time - file_info['timestamp'] > 1800:  # 30 minutes
-                expired_files.append(file_id)
-                try:
-                    if os.path.exists(file_info['path']):
-                        os.remove(file_info['path'])
-                    print(f"Cleaned up expired file: {file_id}")
-                except Exception as e:
-                    print(f"Error cleaning up file {file_id}: {e}")
-        
-        for file_id in expired_files:
-            del temp_files[file_id]
-
-# Start cleanup thread
-cleanup_thread = threading.Thread(target=cleanup_temp_files, daemon=True)
-cleanup_thread.start()
-
-def store_temp_file(file_path: str, content_type: str = "video/mp4") -> str:
-    """Store a file temporarily and return its URL"""
-    file_id = str(uuid.uuid4())
-    temp_files[file_id] = {
-        'path': file_path,
-        'content_type': content_type,
-        'timestamp': time.time()
-    }
-    # Return the URL that Replicate can access
-    base_url = os.getenv("APP_BASE_URL", "https://polydub-production.up.railway.app")
-    return f"{base_url}/temp-files/{file_id}"
-
 async def apply_lip_sync(
     video_path: str,
     audio_path: str,
     output_path: str
 ) -> str:
-    """Apply lip sync to dubbed video using LatentSync"""
+    """Apply lip sync to dubbed video using Kling Lip Sync"""
     
     try:
         print("="*50)
-        print("APPLYING LIP SYNC WITH LATENTSYNC")
+        print("APPLYING LIP SYNC WITH KLING")
         print("="*50)
         print(f"Video: {video_path} ({os.path.getsize(video_path) / 1024 / 1024:.1f} MB)")
         print(f"Audio: {audio_path} ({os.path.getsize(audio_path) / 1024 / 1024:.1f} MB)")
         
-        # Upload files to file.io for URL access
-        print("\nUploading files to temporary hosting...")
+        # Store files temporarily and get URLs
+        print("\nCreating temporary URLs...")
         
-        video_url = upload_to_fileio(video_path)
-        if not video_url:
-            raise ValueError("Failed to upload video file")
-        print(f"Video uploaded: {video_url}")
+        video_url = store_temp_file(video_path, "video/mp4")
+        print(f"Video URL: {video_url}")
         
-        audio_url = upload_to_fileio(audio_path)
-        if not audio_url:
-            raise ValueError("Failed to upload audio file")
-        print(f"Audio uploaded: {audio_url}")
+        audio_url = store_temp_file(audio_path, "audio/wav")
+        print(f"Audio URL: {audio_url}")
         
-        # Run LatentSync with URLs
-        print("\nRunning LatentSync...")
+        # Run Kling Lip Sync with our server URLs
+        print("\nRunning Kling Lip Sync...")
         output = replicate.run(
-            "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04",
+            "kwaivgi/kling-lip-sync",
             input={
-                "video": video_url,
-                "audio": audio_url
+                "video_url": video_url,
+                "audio_file": audio_url
             }
         )
         
-        print(f"LatentSync completed. Output type: {type(output)}")
+        print(f"Kling Lip Sync completed. Output type: {type(output)}")
         
         # Download the result
         if hasattr(output, 'read'):
@@ -475,7 +471,7 @@ async def apply_lip_sync(
             raise ValueError(f"Unexpected output type: {type(output)}")
         
         if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            print(f"\nLIP SYNC SUCCESS! Output: {output_path} ({os.path.getsize(output_path) / 1024 / 1024:.1f} MB)")
+            print(f"\nLIP SYNC SUCCESS! Output: {output_path} ({os.path.getsize(output_path) / 1024 / 1024:.1f} MB}")
             return output_path
         else:
             raise ValueError("Lip sync output file is empty or missing")
@@ -693,7 +689,8 @@ def read_root():
             "WhisperX word-level transcription",
             "GPT-4o smart translation",
             "XTTS voice cloning",
-            "Perfect synchronization"
+            "Perfect synchronization",
+            "Kling Lip Sync (automatic)"
         ],
         "endpoints": {
             "/upload": "POST - Upload video for dubbing",
@@ -794,7 +791,8 @@ async def upload_video(
                 "transcription": "WhisperX (word-level)",
                 "translation": "GPT-4o (smart)",
                 "voice": "XTTS (cloned)",
-                "sync": "Perfect word-level"
+                "sync": "Perfect word-level",
+                "lip_sync": "Kling (automatic)"
             },
             "status_url": f"/status/{job_id}",
             "download_url": f"/download/{job_id}"
