@@ -40,7 +40,7 @@ class Settings:
         self.whisperx_model = "victor-upmeet/whisperx:84d2ad2d6194fe98a17d2b60bef1c7f910c46b2f6fd38996ca457afd9c8abfcb"
         self.gpt4o_model = "openai/gpt-4o"
         self.xtts_model = "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e"
-        self.latentsync_model = "bytedance/latentsync:9d95ee5d66c993bbd3e0779dacd2dd6af6f542de93403aae36c6343455e0ca04"
+        self.kling_lipsync_model = "kwaivgi/kling-lip-sync"
         self.max_file_size_mb = int(os.getenv("MAX_FILE_SIZE_MB", "500"))
 
 settings = Settings()
@@ -670,7 +670,7 @@ def read_root():
             "GPT-4o smart translation",
             "XTTS voice cloning",
             "Perfect synchronization",
-            "LatentSync lip synchronization (automatic)"
+            "Kling Lip Sync (automatic)"
         ],
         "endpoints": {
             "/upload": "POST - Upload video for dubbing",
