@@ -457,7 +457,30 @@ async def apply_lip_sync(
         print(f"Video: {video_path} ({os.path.getsize(video_path) / 1024 / 1024:.1f} MB)")
         print(f"Audio: {audio_path} ({os.path.getsize(audio_path) / 1024 / 1024:.1f} MB)")
         
-        # Upload to tmpfiles.org instead of using local server
+        # Compress audio if it's over 5MB
+        audio_size_mb = os.path.getsize(audio_path) / 1024 / 1024
+        if audio_size_mb > 5:
+            print(f"Audio file is {audio_size_mb:.1f}MB, compressing to under 5MB...")
+            compressed_audio = audio_path.replace('.wav', '_compressed.mp3')
+            
+            # Use FFmpeg to compress audio to MP3 with lower bitrate
+            cmd = [
+                'ffmpeg', '-i', audio_path,
+                '-acodec', 'mp3',
+                '-ab', '96k',  # 96kbps should be enough for voice
+                '-y', compressed_audio
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                new_size = os.path.getsize(compressed_audio) / 1024 / 1024
+                print(f"Compressed audio to {new_size:.1f}MB")
+                audio_path = compressed_audio
+            else:
+                print(f"Audio compression failed: {result.stderr}")
+                raise ValueError("Failed to compress audio for lip sync")
+        
+        # Upload to tmpfiles.org
         print("\nUploading to tmpfiles.org...")
         
         video_url = upload_to_tmpfiles(video_path)
