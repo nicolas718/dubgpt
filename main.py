@@ -243,7 +243,7 @@ def group_words_into_dubbing_segments(segments: List[TimedSegment], target_durat
     return dubbing_segments
 
 async def smart_translate_segment(segment: TimedSegment, target_language: str, context: str = "") -> str:
-    """Translate a segment smartly considering timing constraints"""
+    """Translate a segment prioritizing natural timing over literal translation"""
     
     expansion_factors = {
         "es": 1.25, "fr": 1.30, "de": 1.20, "it": 1.20,
@@ -253,54 +253,73 @@ async def smart_translate_segment(segment: TimedSegment, target_language: str, c
     
     expansion = expansion_factors.get(target_language, 1.2)
     
-    natural_chars = int(len(segment.text) / expansion)
-    max_chars = int(natural_chars * 1.2)
-    min_chars = int(natural_chars * 0.9)
+    # Target 75% of available time to ensure natural pacing
+    safe_duration = segment.duration * 0.75
+    target_chars = int(len(segment.text) / expansion * 0.75)
+    absolute_max = int(target_chars * 1.15)  # Hard limit
     
-    prompt = f"""Translate this text to {LANGUAGE_NAMES.get(target_language, target_language)}.
+    prompt = f"""Translate this to {LANGUAGE_NAMES.get(target_language, target_language)} for dubbing.
 
-Original text: "{segment.text}"
-Duration available: {segment.duration:.1f} seconds
-Target character count: {natural_chars} characters (range: {min_chars}-{max_chars})
+Original: "{segment.text}"
+Time available: {segment.duration:.1f} seconds
+Character limit: {target_chars} chars (HARD MAX: {absolute_max})
 
-Requirements:
-1. Translation must sound natural when spoken
-2. Aim for {natural_chars} characters to match timing
-3. Keep the meaning accurate
+PRIORITY ORDER:
+1. MUST fit naturally in {safe_duration:.1f} seconds when spoken
+2. Preserve core meaning and key information
+3. Use as many direct word translations as possible
+4. Natural speech flow is MORE important than perfect translation
+
+TECHNIQUES:
+- Skip filler words ("well", "um", "you know", "I mean")
+- Use shorter synonyms ("utilize" → "use")
+- Contract phrases ("I am going to" → "I'll")
+- Remove redundant words
+- If too long, summarize secondary details
+
+Example: "Well, I really think we should probably consider going" → "We should consider going"
 
 Context: {context[-200:] if context else 'Start of video'}
 
-Return ONLY the translated text."""
+Return ONLY the {target_language} translation."""
 
     try:
-        print(f"\nTranslating to {target_language}: '{segment.text[:50]}...'")
+        print(f"\nTranslating segment ({segment.duration:.1f}s): '{segment.text[:60]}...'")
         
         output = replicate.run(
             settings.gpt4o_model,
             input={
                 "prompt": prompt,
-                "temperature": 0.3,
-                "system_prompt": "You are a professional translator specializing in video dubbing."
+                "temperature": 0.4,  # Slightly higher for more natural variations
+                "system_prompt": f"You are a professional {target_language} dubbing translator. Prioritize natural timing and speech flow over literal accuracy. The dubbed audio must fit comfortably within the time constraint without rushing."
             }
         )
         
         if output is None:
-            print(f"WARNING: Translation returned None")
-            return segment.text
+            return segment.text[:target_chars]
             
         translated_text = ''.join(output).strip()
         
-        if not translated_text:
-            print(f"WARNING: Empty translation")
-            return segment.text
-            
-        print(f"Translated: '{translated_text[:50]}...' ({len(translated_text)} chars)")
+        # Strict enforcement of length
+        if len(translated_text) > absolute_max:
+            print(f"Translation too long ({len(translated_text)}), trimming to {absolute_max}")
+            # Smart truncation at sentence/phrase boundary
+            sentences = translated_text.split('. ')
+            truncated = ""
+            for sentence in sentences:
+                if len(truncated) + len(sentence) + 2 <= absolute_max:
+                    truncated += sentence + ". "
+                else:
+                    break
+            translated_text = truncated.strip() or translated_text[:absolute_max]
+        
+        print(f"Result: {len(translated_text)} chars - '{translated_text[:50]}...'")
         
         return translated_text
         
     except Exception as e:
         print(f"Translation error: {e}")
-        return segment.text
+        return segment.text[:target_chars]
 
 async def generate_dubbed_segment(
     segment: TimedSegment,
@@ -344,10 +363,16 @@ async def generate_dubbed_segment(
         # CRITICAL: Ensure audio NEVER exceeds segment duration
         if actual_duration > segment.duration:
             speed_factor = actual_duration / segment.duration
-            speed_factor = min(1.35, speed_factor)  # Cap at 1.35x to maintain quality
             
-            print(f"Segment too long: {actual_duration:.2f}s > {segment.duration:.2f}s")
-            print(f"Applying {speed_factor:.2f}x speed adjustment")
+            # MINIMAL speed adjustment - max 1.15x to keep natural sound
+            if speed_factor > 1.15:
+                print(f"WARNING: Segment needs {speed_factor:.2f}x speed - translation too long!")
+                print(f"  Text: '{translated_text[:60]}...'")
+                print(f"  Consider shorter translation for natural pacing")
+            
+            speed_factor = min(1.15, speed_factor)  # Max 15% speedup only
+            
+            print(f"Adjusting speed: {actual_duration:.2f}s to fit {segment.duration:.2f}s ({speed_factor:.2f}x)")
             
             cmd = [
                 'ffmpeg', '-i', temp_output,
