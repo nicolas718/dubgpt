@@ -182,6 +182,7 @@ def group_words_into_dubbing_segments(segments: List[TimedSegment], target_durat
         
         word_text = word.word.strip()
         
+        # Natural break points
         if word_text.endswith(('.', '!', '?')) and duration >= 1.5:
             should_segment = True
             reason = "sentence_end"
@@ -206,20 +207,39 @@ def group_words_into_dubbing_segments(segments: List[TimedSegment], target_durat
             reason = "last_word"
         
         if should_segment and current_words:
+            # CRITICAL: Ensure clean segment boundaries
+            segment_start = current_start
+            segment_end = current_words[-1].end
+            
+            # Add tiny buffer to prevent overlaps
+            if i < len(all_words) - 1:
+                next_start = all_words[i + 1].start
+                if segment_end >= next_start:
+                    segment_end = next_start - 0.01  # 10ms buffer
+            
             text = ' '.join([w.word for w in current_words])
             dubbing_segment = TimedSegment(
                 text=text.strip(),
-                start_time=current_start,
-                end_time=word.end,
-                duration=word.end - current_start,
+                start_time=segment_start,
+                end_time=segment_end,
+                duration=segment_end - segment_start,
                 words=current_words.copy()
             )
             dubbing_segments.append(dubbing_segment)
+            
+            if reason:
+                print(f"Segment {len(dubbing_segments)-1}: {dubbing_segment.duration:.2f}s @ {segment_start:.2f}-{segment_end:.2f} - '{text[:40]}...'")
             
             current_words = []
             current_start = None
     
     print(f"Created {len(dubbing_segments)} dubbing segments")
+    
+    # Verify no overlaps
+    for i in range(len(dubbing_segments) - 1):
+        if dubbing_segments[i].end_time > dubbing_segments[i+1].start_time:
+            print(f"WARNING: Segments {i} and {i+1} overlap!")
+    
     return dubbing_segments
 
 async def smart_translate_segment(segment: TimedSegment, target_language: str, context: str = "") -> str:
@@ -321,9 +341,13 @@ async def generate_dubbed_segment(
         actual_duration = audio_clip.duration
         audio_clip.close()
         
-        if abs(actual_duration - segment.duration) > 0.1:
+        # CRITICAL: Ensure audio NEVER exceeds segment duration
+        if actual_duration > segment.duration:
             speed_factor = actual_duration / segment.duration
-            speed_factor = max(0.85, min(1.25, speed_factor))  # Limit speed adjustment
+            speed_factor = min(1.35, speed_factor)  # Cap at 1.35x to maintain quality
+            
+            print(f"Segment too long: {actual_duration:.2f}s > {segment.duration:.2f}s")
+            print(f"Applying {speed_factor:.2f}x speed adjustment")
             
             cmd = [
                 'ffmpeg', '-i', temp_output,
@@ -334,9 +358,37 @@ async def generate_dubbed_segment(
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode == 0:
                 os.remove(temp_output)
+                
+                # Double-check duration after speed adjustment
+                adjusted_clip = AudioFileClip(output_path)
+                final_duration = adjusted_clip.duration
+                adjusted_clip.close()
+                
+                # If still too long, hard trim with fade out
+                if final_duration > segment.duration:
+                    fade_start = segment.duration - 0.1
+                    cmd = [
+                        'ffmpeg', '-i', output_path,
+                        '-t', str(segment.duration),
+                        '-af', f'afade=out=st={fade_start}:d=0.1',
+                        '-y', output_path + '_trimmed.wav'
+                    ]
+                    subprocess.run(cmd, capture_output=True)
+                    os.remove(output_path)
+                    os.rename(output_path + '_trimmed.wav', output_path)
+                    print(f"Hard trimmed to {segment.duration:.2f}s with fade")
             else:
+                # FFmpeg failed, use hard trim
                 shutil.move(temp_output, output_path)
+                cmd = [
+                    'ffmpeg', '-i', output_path,
+                    '-t', str(segment.duration),
+                    '-y', output_path + '_trimmed.wav'
+                ]
+                subprocess.run(cmd, capture_output=True)
+                os.rename(output_path + '_trimmed.wav', output_path)
         else:
+            # Audio is shorter than segment - this is fine
             shutil.move(temp_output, output_path)
         
         return output_path
@@ -499,6 +551,21 @@ async def process_video_with_perfect_sync(
         update_job_status(job_id, "combining_audio", 75)
         
         from moviepy.editor import CompositeAudioClip
+        
+        # Sort segments by start time to ensure proper order
+        audio_segments.sort(key=lambda x: x.start)
+        
+        # Verify no overlaps
+        for i in range(len(audio_segments) - 1):
+            current = audio_segments[i]
+            next_seg = audio_segments[i + 1]
+            current_end = current.start + current.duration
+            
+            if current_end > next_seg.start:
+                overlap = current_end - next_seg.start
+                print(f"WARNING: Segment {i} overlaps with {i+1} by {overlap:.3f}s")
+                print(f"  Segment {i}: start={current.start:.2f}, duration={current.duration:.2f}, end={current_end:.2f}")
+                print(f"  Segment {i+1}: start={next_seg.start:.2f}")
         
         # Create base silent audio
         base_audio = AudioClip(lambda t: 0, duration=original_duration)
