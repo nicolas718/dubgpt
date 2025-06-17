@@ -367,16 +367,20 @@ async def generate_dubbed_segment(
                 # If still too long, hard trim with fade out
                 if final_duration > segment.duration:
                     fade_start = segment.duration - 0.1
+                    trimmed_path = output_path + '_trimmed.wav'
                     cmd = [
                         'ffmpeg', '-i', output_path,
                         '-t', str(segment.duration),
                         '-af', f'afade=out=st={fade_start}:d=0.1',
-                        '-y', output_path + '_trimmed.wav'
+                        '-y', trimmed_path
                     ]
-                    subprocess.run(cmd, capture_output=True)
-                    os.remove(output_path)
-                    os.rename(output_path + '_trimmed.wav', output_path)
-                    print(f"Hard trimmed to {segment.duration:.2f}s with fade")
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode == 0 and os.path.exists(trimmed_path):
+                        os.remove(output_path)
+                        os.rename(trimmed_path, output_path)
+                        print(f"Hard trimmed to {segment.duration:.2f}s with fade")
+                    else:
+                        print(f"Trim failed: {result.stderr}")
             else:
                 # FFmpeg failed, use hard trim
                 shutil.move(temp_output, output_path)
@@ -518,6 +522,8 @@ async def process_video_with_perfect_sync(
         update_job_status(job_id, "generating_audio", 50)
         
         audio_segments = []
+        failed_segments = []
+        
         for i, item in enumerate(translated_segments):
             segment = item["segment"]
             translation = item["translation"]
@@ -536,16 +542,35 @@ async def process_video_with_perfect_sync(
                     segment_output_path
                 )
                 
-                if os.path.exists(segment_output_path):
+                if os.path.exists(segment_output_path) and os.path.getsize(segment_output_path) > 0:
                     audio_seg = AudioFileClip(segment_output_path)
+                    actual_duration = audio_seg.duration
+                    
+                    print(f"Segment {i}: Generated {actual_duration:.2f}s audio for {segment.duration:.2f}s slot")
+                    print(f"  Position: {segment.start_time:.2f}-{segment.end_time:.2f}")
+                    print(f"  Text: '{segment.text[:50]}...'")
+                    print(f"  Translation: '{translation[:50]}...'")
+                    
                     audio_seg = audio_seg.set_start(segment.start_time)
                     audio_segments.append(audio_seg)
+                else:
+                    print(f"ERROR: Segment {i} file missing or empty: {segment_output_path}")
+                    failed_segments.append(i)
                     
             except Exception as e:
-                print(f"Error processing segment {i}: {e}")
+                print(f"ERROR: Failed to process segment {i}: {e}")
+                print(f"  Position: {segment.start_time:.2f}-{segment.end_time:.2f}")
+                print(f"  Text: '{segment.text}'")
+                failed_segments.append(i)
+        
+        if failed_segments:
+            print(f"\nWARNING: {len(failed_segments)} segments failed: {failed_segments}")
+            print("This will cause gaps/silence in the output")
         
         if not audio_segments:
             raise DubbingError("audio_generation", "No audio segments were generated")
+        
+        print(f"\nSuccessfully generated {len(audio_segments)} out of {len(translated_segments)} segments")
         
         # Step 5: Combine audio
         update_job_status(job_id, "combining_audio", 75)
@@ -555,6 +580,20 @@ async def process_video_with_perfect_sync(
         # Sort segments by start time to ensure proper order
         audio_segments.sort(key=lambda x: x.start)
         
+        # Debug: Print timeline coverage
+        print("\nAudio Timeline Coverage:")
+        covered_time = 0
+        for i, seg in enumerate(audio_segments):
+            if seg.start > covered_time + 0.1:
+                gap_duration = seg.start - covered_time
+                print(f"  GAP: {covered_time:.2f}-{seg.start:.2f} ({gap_duration:.2f}s silence)")
+            
+            print(f"  Segment {i}: {seg.start:.2f}-{seg.start + seg.duration:.2f} ({seg.duration:.2f}s)")
+            covered_time = seg.start + seg.duration
+        
+        if covered_time < original_duration:
+            print(f"  GAP: {covered_time:.2f}-{original_duration:.2f} ({original_duration - covered_time:.2f}s silence)")
+        
         # Verify no overlaps
         for i in range(len(audio_segments) - 1):
             current = audio_segments[i]
@@ -563,9 +602,7 @@ async def process_video_with_perfect_sync(
             
             if current_end > next_seg.start:
                 overlap = current_end - next_seg.start
-                print(f"WARNING: Segment {i} overlaps with {i+1} by {overlap:.3f}s")
-                print(f"  Segment {i}: start={current.start:.2f}, duration={current.duration:.2f}, end={current_end:.2f}")
-                print(f"  Segment {i+1}: start={next_seg.start:.2f}")
+                print(f"\nWARNING: Segment {i} overlaps with {i+1} by {overlap:.3f}s")
         
         # Create base silent audio
         base_audio = AudioClip(lambda t: 0, duration=original_duration)
