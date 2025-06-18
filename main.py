@@ -5,8 +5,6 @@ import shutil
 import tempfile
 import traceback
 import subprocess
-import threading
-import time
 from typing import Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -80,7 +78,7 @@ async def lifespan(app: FastAPI):
             except:
                 pass
 
-app = FastAPI(title="Polydub API", version="6.0", lifespan=lifespan)
+app = FastAPI(title="Polydub API", version="7.0", lifespan=lifespan)
 
 def update_job_status(job_id: str, status: str, progress: int = 0, 
                      result: Optional[str] = None, error: Optional[str] = None):
@@ -101,10 +99,7 @@ def upload_to_tmpfiles(file_path: str) -> Optional[str]:
             if response.status_code == 200:
                 data = response.json()
                 if data.get('status') == 'success':
-                    # Convert to direct download URL
                     url = data['data']['url']
-                    # tmpfiles.org returns URLs like https://tmpfiles.org/1234567/file.mp4
-                    # We need to convert to https://tmpfiles.org/dl/1234567/file.mp4
                     direct_url = url.replace('tmpfiles.org/', 'tmpfiles.org/dl/')
                     return direct_url
                     
@@ -115,12 +110,7 @@ def upload_to_tmpfiles(file_path: str) -> Optional[str]:
 def extract_word_timings_from_whisperx(whisperx_output: dict) -> List[TimedSegment]:
     segments = []
     
-    print(f"WhisperX output type: {type(whisperx_output)}")
-    print(f"WhisperX output keys: {whisperx_output.keys() if isinstance(whisperx_output, dict) else 'Not a dict'}")
-    
     if isinstance(whisperx_output, dict) and "segments" in whisperx_output:
-        print(f"Found {len(whisperx_output['segments'])} segments in WhisperX output")
-        
         for idx, seg in enumerate(whisperx_output["segments"]):
             words = []
             
@@ -144,12 +134,14 @@ def extract_word_timings_from_whisperx(whisperx_output: dict) -> List[TimedSegme
             if segment.text:
                 segments.append(segment)
     
-    print(f"Total segments extracted: {len(segments)}")
+    print(f"Extracted {len(segments)} segments from WhisperX")
     return segments
 
 def group_words_into_dubbing_segments(segments: List[TimedSegment], target_duration: float = 4.0) -> List[TimedSegment]:
+    """Group words into segments with clean boundaries"""
     dubbing_segments = []
     
+    # Collect all words
     all_words = []
     for segment in segments:
         if segment.words:
@@ -178,44 +170,34 @@ def group_words_into_dubbing_segments(segments: List[TimedSegment], target_durat
         duration = word.end - current_start
         
         should_segment = False
-        reason = ""
         
         word_text = word.word.strip()
         
         # Natural break points
         if word_text.endswith(('.', '!', '?')) and duration >= 1.5:
             should_segment = True
-            reason = "sentence_end"
-        
-        elif word_text.endswith((',', ';', ':')) and duration >= 3.0:
+        elif word_text.endswith((',', ';', ':')) and duration >= 2.5:
             should_segment = True
-            reason = "clause_end"
-        
         elif duration >= target_duration:
             should_segment = True
-            reason = "max_duration"
-        
         elif i < len(all_words) - 1:
             next_word = all_words[i + 1]
             pause_duration = next_word.start - word.end
-            if pause_duration > 0.4 and duration >= 1.5:
+            if pause_duration > 0.5 and duration >= 1.0:
                 should_segment = True
-                reason = "natural_pause"
-        
         elif i == len(all_words) - 1:
             should_segment = True
-            reason = "last_word"
         
         if should_segment and current_words:
-            # CRITICAL: Ensure clean segment boundaries
+            # Ensure clean boundaries with buffer
             segment_start = current_start
             segment_end = current_words[-1].end
             
-            # Add tiny buffer to prevent overlaps
+            # Add 20ms buffer to prevent overlaps
             if i < len(all_words) - 1:
                 next_start = all_words[i + 1].start
-                if segment_end >= next_start:
-                    segment_end = next_start - 0.01  # 10ms buffer
+                if segment_end > next_start - 0.02:
+                    segment_end = next_start - 0.02
             
             text = ' '.join([w.word for w in current_words])
             dubbing_segment = TimedSegment(
@@ -225,101 +207,90 @@ def group_words_into_dubbing_segments(segments: List[TimedSegment], target_durat
                 duration=segment_end - segment_start,
                 words=current_words.copy()
             )
-            dubbing_segments.append(dubbing_segment)
             
-            if reason:
-                print(f"Segment {len(dubbing_segments)-1}: {dubbing_segment.duration:.2f}s @ {segment_start:.2f}-{segment_end:.2f} - '{text[:40]}...'")
+            if dubbing_segment.duration > 0.1:  # Skip micro-segments
+                dubbing_segments.append(dubbing_segment)
             
             current_words = []
             current_start = None
     
     print(f"Created {len(dubbing_segments)} dubbing segments")
-    
-    # Verify no overlaps
-    for i in range(len(dubbing_segments) - 1):
-        if dubbing_segments[i].end_time > dubbing_segments[i+1].start_time:
-            print(f"WARNING: Segments {i} and {i+1} overlap!")
-    
     return dubbing_segments
 
 async def smart_translate_segment(segment: TimedSegment, target_language: str, context: str = "") -> str:
-    """Translate a segment prioritizing natural timing over literal translation"""
+    """Translate for natural dubbing - quality over literal accuracy"""
     
+    # Language expansion factors
     expansion_factors = {
-        "es": 1.25, "fr": 1.30, "de": 1.20, "it": 1.20,
-        "pt": 1.25, "ru": 0.90, "ja": 0.70, "ko": 0.75,
-        "zh": 0.50, "ar": 1.10, "hi": 1.15
+        "es": 1.20, "fr": 1.25, "de": 1.15, "it": 1.15,
+        "pt": 1.20, "ru": 0.85, "ja": 0.65, "ko": 0.70,
+        "zh": 0.45, "ar": 1.05, "hi": 1.10
     }
     
-    expansion = expansion_factors.get(target_language, 1.2)
+    expansion = expansion_factors.get(target_language, 1.15)
     
-    # Target 75% of available time to ensure natural pacing
-    safe_duration = segment.duration * 0.75
-    target_chars = int(len(segment.text) / expansion * 0.75)
-    absolute_max = int(target_chars * 1.15)  # Hard limit
+    # Conservative targets for natural pacing
+    safe_duration = segment.duration * 0.80  # Use only 80% of time
+    target_chars = int(len(segment.text) / expansion * 0.80)
+    max_chars = int(target_chars * 1.1)  # Absolute maximum
     
-    prompt = f"""Translate this to {LANGUAGE_NAMES.get(target_language, target_language)} for dubbing.
+    # Clean the text
+    clean_text = segment.text.strip()
+    clean_text = ' '.join(clean_text.split())  # Remove extra spaces
+    
+    prompt = f"""You are dubbing a video from English to {LANGUAGE_NAMES.get(target_language, target_language)}.
 
-Original: "{segment.text}"
-Time available: {segment.duration:.1f} seconds
-Character limit: {target_chars} chars (HARD MAX: {absolute_max})
+Original: "{clean_text}"
+Duration: {segment.duration:.1f} seconds
+Character target: {target_chars} (MAX: {max_chars})
 
-PRIORITY ORDER:
-1. MUST fit naturally in {safe_duration:.1f} seconds when spoken
-2. Preserve core meaning and key information
-3. Use as many direct word translations as possible
-4. Natural speech flow is MORE important than perfect translation
+CRITICAL RULES:
+1. The translation MUST sound natural when spoken at normal speed
+2. MUST be under {max_chars} characters
+3. Preserve the core meaning and emotion
+4. Use common, conversational language
+5. Remove ALL filler words (um, uh, well, you know, I mean)
+6. Use contractions where natural
+7. If too long, keep key points and drop details
 
-TECHNIQUES:
-- Skip filler words ("well", "um", "you know", "I mean")
-- Use shorter synonyms ("utilize" → "use")
-- Contract phrases ("I am going to" → "I'll")
-- Remove redundant words
-- If too long, summarize secondary details
+IMPORTANT: The dubbed speech must fit comfortably in {safe_duration:.1f} seconds.
 
-Example: "Well, I really think we should probably consider going" → "We should consider going"
+Previous context: {context[-150:] if context else 'Beginning of video'}
 
-Context: {context[-200:] if context else 'Start of video'}
-
-Return ONLY the {target_language} translation."""
+Return ONLY the {target_language} translation, no explanations."""
 
     try:
-        print(f"\nTranslating segment ({segment.duration:.1f}s): '{segment.text[:60]}...'")
-        
         output = replicate.run(
             settings.gpt4o_model,
             input={
                 "prompt": prompt,
-                "temperature": 0.4,  # Slightly higher for more natural variations
-                "system_prompt": f"You are a professional {target_language} dubbing translator. Prioritize natural timing and speech flow over literal accuracy. The dubbed audio must fit comfortably within the time constraint without rushing."
+                "temperature": 0.3,
+                "system_prompt": f"You are an expert {target_language} dubbing specialist. Create natural, conversational translations that fit time constraints perfectly. Never sacrifice natural flow for literal accuracy."
             }
         )
         
-        if output is None:
-            return segment.text[:target_chars]
-            
-        translated_text = ''.join(output).strip()
+        if not output:
+            return clean_text[:target_chars]
         
-        # Strict enforcement of length
-        if len(translated_text) > absolute_max:
-            print(f"Translation too long ({len(translated_text)}), trimming to {absolute_max}")
-            # Smart truncation at sentence/phrase boundary
-            sentences = translated_text.split('. ')
-            truncated = ""
-            for sentence in sentences:
-                if len(truncated) + len(sentence) + 2 <= absolute_max:
-                    truncated += sentence + ". "
+        translated = ''.join(output).strip()
+        
+        # Enforce length limit
+        if len(translated) > max_chars:
+            # Smart truncation
+            sentences = translated.split('. ')
+            result = ""
+            for sent in sentences:
+                if len(result) + len(sent) + 2 <= max_chars:
+                    result += sent + ". "
                 else:
                     break
-            translated_text = truncated.strip() or translated_text[:absolute_max]
+            translated = result.strip() or translated[:max_chars]
         
-        print(f"Result: {len(translated_text)} chars - '{translated_text[:50]}...'")
-        
-        return translated_text
+        return translated
         
     except Exception as e:
         print(f"Translation error: {e}")
-        return segment.text[:target_chars]
+        return clean_text[:target_chars]
 
 async def generate_dubbed_segment(
     segment: TimedSegment,
@@ -328,8 +299,9 @@ async def generate_dubbed_segment(
     speaker_audio_path: str,
     output_path: str
 ) -> str:
-    """Generate dubbed audio for a segment using XTTS"""
+    """Generate dubbed audio with minimal speed adjustment"""
     try:
+        # Generate audio with XTTS
         with open(speaker_audio_path, "rb") as audio_file:
             output = replicate.run(
                 settings.xtts_model,
@@ -340,85 +312,77 @@ async def generate_dubbed_segment(
                 }
             )
         
+        # Get audio URL
         if isinstance(output, str):
             audio_url = output
         elif isinstance(output, list) and len(output) > 0:
             audio_url = output[0]
         else:
-            raise ValueError("Invalid output from XTTS")
+            raise ValueError("Invalid XTTS output")
         
-        # Download generated audio
-        temp_output = output_path + "_temp.wav"
-        with requests.get(audio_url, stream=True) as r:
-            r.raise_for_status()
-            with open(temp_output, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
+        # Download audio
+        temp_path = output_path + "_temp.wav"
+        response = requests.get(audio_url, stream=True)
+        response.raise_for_status()
         
-        # Check duration and adjust speed if needed
-        audio_clip = AudioFileClip(temp_output)
+        with open(temp_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        
+        # Check duration
+        audio_clip = AudioFileClip(temp_path)
         actual_duration = audio_clip.duration
         audio_clip.close()
         
-        # CRITICAL: Ensure audio NEVER exceeds segment duration
+        # Handle duration mismatch
         if actual_duration > segment.duration:
             speed_factor = actual_duration / segment.duration
             
-            # MINIMAL speed adjustment - max 1.15x to keep natural sound
+            # Maximum 15% speedup for natural sound
             if speed_factor > 1.15:
-                print(f"WARNING: Segment needs {speed_factor:.2f}x speed - translation too long!")
-                print(f"  Text: '{translated_text[:60]}...'")
-                print(f"  Consider shorter translation for natural pacing")
+                print(f"WARNING: Segment {output_path} needs {speed_factor:.2f}x speed")
+                speed_factor = 1.15
             
-            speed_factor = min(1.15, speed_factor)  # Max 15% speedup only
-            
-            print(f"Adjusting speed: {actual_duration:.2f}s to fit {segment.duration:.2f}s ({speed_factor:.2f}x)")
-            
+            # Apply speed adjustment
             cmd = [
-                'ffmpeg', '-i', temp_output,
+                'ffmpeg', '-i', temp_path,
                 '-filter:a', f'atempo={speed_factor}',
                 '-y', output_path
             ]
             
             result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                os.remove(temp_output)
+            
+            if result.returncode != 0:
+                print(f"FFmpeg speed adjustment failed: {result.stderr}")
+                shutil.move(temp_path, output_path)
+            else:
+                os.remove(temp_path)
                 
-                # Double-check duration after speed adjustment
-                adjusted_clip = AudioFileClip(output_path)
-                final_duration = adjusted_clip.duration
-                adjusted_clip.close()
+                # Verify final duration and hard trim if needed
+                final_clip = AudioFileClip(output_path)
+                final_duration = final_clip.duration
+                final_clip.close()
                 
-                # If still too long, hard trim with fade out
-                if final_duration > segment.duration:
-                    fade_start = segment.duration - 0.1
-                    trimmed_path = output_path + '_trimmed.wav'
-                    cmd = [
+                if final_duration > segment.duration + 0.01:
+                    # Hard trim with fade
+                    fade_duration = min(0.05, segment.duration * 0.1)
+                    fade_start = segment.duration - fade_duration
+                    
+                    trim_cmd = [
                         'ffmpeg', '-i', output_path,
                         '-t', str(segment.duration),
-                        '-af', f'afade=out=st={fade_start}:d=0.1',
-                        '-y', trimmed_path
+                        '-af', f'afade=out=st={fade_start}:d={fade_duration}',
+                        '-y', output_path + '_trim.wav'
                     ]
-                    result = subprocess.run(cmd, capture_output=True, text=True)
-                    if result.returncode == 0 and os.path.exists(trimmed_path):
+                    
+                    subprocess.run(trim_cmd, capture_output=True)
+                    
+                    if os.path.exists(output_path + '_trim.wav'):
                         os.remove(output_path)
-                        os.rename(trimmed_path, output_path)
-                        print(f"Hard trimmed to {segment.duration:.2f}s with fade")
-                    else:
-                        print(f"Trim failed: {result.stderr}")
-            else:
-                # FFmpeg failed, use hard trim
-                shutil.move(temp_output, output_path)
-                cmd = [
-                    'ffmpeg', '-i', output_path,
-                    '-t', str(segment.duration),
-                    '-y', output_path + '_trimmed.wav'
-                ]
-                subprocess.run(cmd, capture_output=True)
-                os.rename(output_path + '_trimmed.wav', output_path)
+                        os.rename(output_path + '_trim.wav', output_path)
         else:
-            # Audio is shorter than segment - this is fine
-            shutil.move(temp_output, output_path)
+            # Audio fits perfectly
+            shutil.move(temp_path, output_path)
         
         return output_path
         
@@ -433,27 +397,18 @@ async def apply_lip_sync(
     """Apply lip sync using LatentSync"""
     
     try:
-        print("="*50)
-        print("APPLYING LIP SYNC WITH LATENTSYNC")
-        print("="*50)
-        print(f"Video: {video_path} ({os.path.getsize(video_path) / 1024 / 1024:.1f} MB)")
-        print(f"Audio: {audio_path} ({os.path.getsize(audio_path) / 1024 / 1024:.1f} MB)")
+        print("\nApplying lip sync...")
         
-        # Upload to tmpfiles.org
-        print("\nUploading to tmpfiles.org...")
-        
+        # Upload files
         video_url = upload_to_tmpfiles(video_path)
         if not video_url:
             raise ValueError("Failed to upload video")
-        print(f"Video URL: {video_url}")
-        
+            
         audio_url = upload_to_tmpfiles(audio_path)
         if not audio_url:
             raise ValueError("Failed to upload audio")
-        print(f"Audio URL: {audio_url}")
         
         # Run LatentSync
-        print("\nRunning LatentSync...")
         output = replicate.run(
             settings.latentsync_model,
             input={
@@ -462,9 +417,7 @@ async def apply_lip_sync(
             }
         )
         
-        print(f"LatentSync completed. Output type: {type(output)}")
-        
-        # Download the result
+        # Download result
         if hasattr(output, 'read'):
             with open(output_path, 'wb') as f:
                 f.write(output.read())
@@ -476,13 +429,12 @@ async def apply_lip_sync(
             raise ValueError(f"Unexpected output type: {type(output)}")
         
         if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            print(f"\nLIP SYNC SUCCESS! Output: {output_path}")
             return output_path
         else:
-            raise ValueError("Lip sync output file is empty or missing")
+            raise ValueError("Lip sync output is empty")
         
     except Exception as e:
-        print(f"\nLIP SYNC FAILED: {e}")
+        print(f"Lip sync error: {e}")
         raise DubbingError("lip_sync", str(e))
 
 async def process_video_with_perfect_sync(
@@ -491,42 +443,47 @@ async def process_video_with_perfect_sync(
     filename: str,
     target_language: str
 ):
-    """Main processing pipeline"""
+    """Main processing pipeline with refined synchronization"""
     temp_dir = os.path.dirname(file_path)
     
     try:
-        # Step 1: Extract audio
+        # Extract audio
         update_job_status(job_id, "extracting_audio", 10)
         
         audio_path = os.path.join(temp_dir, "audio.wav")
         video = VideoFileClip(file_path)
         original_duration = video.duration
-        video.audio.write_audiofile(audio_path, codec='pcm_s16le', logger=None)
         
-        # Step 2: Transcribe with WhisperX
+        # Extract audio with consistent format
+        video.audio.write_audiofile(
+            audio_path, 
+            codec='pcm_s16le',
+            fps=16000,  # Standard for speech
+            nbytes=2,
+            logger=None
+        )
+        
+        # Transcribe
         update_job_status(job_id, "transcribing", 20)
         
-        try:
-            with open(audio_path, "rb") as audio_file:
-                whisperx_output = replicate.run(
-                    settings.whisperx_model,
-                    input={
-                        "audio_file": audio_file,
-                        "batch_size": 16,
-                        "align_output": True,
-                        "diarization": False
-                    }
-                )
-        except Exception as e:
-            raise DubbingError("transcription", f"WhisperX failed: {str(e)}")
+        with open(audio_path, "rb") as audio_file:
+            whisperx_output = replicate.run(
+                settings.whisperx_model,
+                input={
+                    "audio_file": audio_file,
+                    "batch_size": 16,
+                    "align_output": True,
+                    "diarization": False
+                }
+            )
         
         segments = extract_word_timings_from_whisperx(whisperx_output)
         if not segments:
             raise DubbingError("transcription", "No segments extracted")
         
-        dubbing_segments = group_words_into_dubbing_segments(segments)
+        dubbing_segments = group_words_into_dubbing_segments(segments, target_duration=3.5)
         
-        # Step 3: Translate segments
+        # Translate
         update_job_status(job_id, "translating", 35)
         
         translated_segments = []
@@ -534,29 +491,32 @@ async def process_video_with_perfect_sync(
         
         for i, segment in enumerate(dubbing_segments):
             progress = 35 + (15 * i / len(dubbing_segments))
-            update_job_status(job_id, f"translating_segment_{i+1}", int(progress))
+            update_job_status(job_id, f"translating_{i+1}", int(progress))
             
             translated_text = await smart_translate_segment(segment, target_language, context)
             translated_segments.append({
                 "segment": segment,
                 "translation": translated_text
             })
-            context += f" {translated_text}"
+            context = translated_text  # Only recent context
         
-        # Step 4: Generate dubbed audio
+        # Generate audio
         update_job_status(job_id, "generating_audio", 50)
         
         audio_segments = []
-        failed_segments = []
+        segment_files = []
         
         for i, item in enumerate(translated_segments):
             segment = item["segment"]
             translation = item["translation"]
             
-            progress = 50 + (25 * i / len(translated_segments))
-            update_job_status(job_id, f"dubbing_segment_{i+1}", int(progress))
+            if not translation.strip():
+                continue
             
-            segment_output_path = os.path.join(temp_dir, f"segment_{i:04d}.wav")
+            progress = 50 + (25 * i / len(translated_segments))
+            update_job_status(job_id, f"dubbing_{i+1}", int(progress))
+            
+            segment_path = os.path.join(temp_dir, f"seg_{i:04d}.wav")
             
             try:
                 await generate_dubbed_segment(
@@ -564,152 +524,123 @@ async def process_video_with_perfect_sync(
                     translation,
                     target_language,
                     audio_path,
-                    segment_output_path
+                    segment_path
                 )
                 
-                if os.path.exists(segment_output_path) and os.path.getsize(segment_output_path) > 0:
-                    audio_seg = AudioFileClip(segment_output_path)
-                    actual_duration = audio_seg.duration
+                if os.path.exists(segment_path):
+                    segment_files.append(segment_path)
                     
-                    print(f"Segment {i}: Generated {actual_duration:.2f}s audio for {segment.duration:.2f}s slot")
-                    print(f"  Position: {segment.start_time:.2f}-{segment.end_time:.2f}")
-                    print(f"  Text: '{segment.text[:50]}...'")
-                    print(f"  Translation: '{translation[:50]}...'")
+                    # Load and position audio
+                    audio_seg = AudioFileClip(segment_path)
+                    
+                    # Ensure no duration overflow
+                    if audio_seg.duration > segment.duration:
+                        audio_seg = audio_seg.subclip(0, segment.duration)
                     
                     audio_seg = audio_seg.set_start(segment.start_time)
                     audio_segments.append(audio_seg)
-                else:
-                    print(f"ERROR: Segment {i} file missing or empty: {segment_output_path}")
-                    failed_segments.append(i)
                     
             except Exception as e:
-                print(f"ERROR: Failed to process segment {i}: {e}")
-                print(f"  Position: {segment.start_time:.2f}-{segment.end_time:.2f}")
-                print(f"  Text: '{segment.text}'")
-                failed_segments.append(i)
-        
-        if failed_segments:
-            print(f"\nWARNING: {len(failed_segments)} segments failed: {failed_segments}")
-            print("This will cause gaps/silence in the output")
+                print(f"Segment {i} error: {e}")
+                continue
         
         if not audio_segments:
-            raise DubbingError("audio_generation", "No audio segments were generated")
+            raise DubbingError("audio_generation", "No audio segments generated")
         
-        print(f"\nSuccessfully generated {len(audio_segments)} out of {len(translated_segments)} segments")
-        
-        # Step 5: Combine audio
+        # Combine audio
         update_job_status(job_id, "combining_audio", 75)
         
-        from moviepy.editor import CompositeAudioClip
-        
-        # Sort segments by start time to ensure proper order
-        audio_segments.sort(key=lambda x: x.start)
-        
-        # Debug: Print timeline coverage
-        print("\nAudio Timeline Coverage:")
-        covered_time = 0
-        for i, seg in enumerate(audio_segments):
-            if seg.start > covered_time + 0.1:
-                gap_duration = seg.start - covered_time
-                print(f"  GAP: {covered_time:.2f}-{seg.start:.2f} ({gap_duration:.2f}s silence)")
-            
-            print(f"  Segment {i}: {seg.start:.2f}-{seg.start + seg.duration:.2f} ({seg.duration:.2f}s)")
-            covered_time = seg.start + seg.duration
-        
-        if covered_time < original_duration:
-            print(f"  GAP: {covered_time:.2f}-{original_duration:.2f} ({original_duration - covered_time:.2f}s silence)")
-        
-        # Verify no overlaps
-        for i in range(len(audio_segments) - 1):
-            current = audio_segments[i]
-            next_seg = audio_segments[i + 1]
-            current_end = current.start + current.duration
-            
-            if current_end > next_seg.start:
-                overlap = current_end - next_seg.start
-                print(f"\nWARNING: Segment {i} overlaps with {i+1} by {overlap:.3f}s")
-        
-        # Create base silent audio
+        # Create clean composite
         base_audio = AudioClip(lambda t: 0, duration=original_duration)
-        base_audio.fps = 44100
+        base_audio.fps = 16000
         
-        # Combine all audio segments
-        all_clips = [base_audio] + audio_segments
-        final_audio = CompositeAudioClip(all_clips)
+        final_audio = CompositeAudioClip([base_audio] + audio_segments)
         
-        temp_final_audio = os.path.join(temp_dir, "final_dubbed_audio.wav")
-        final_audio.write_audiofile(temp_final_audio, fps=44100, logger=None)
+        temp_audio_path = os.path.join(temp_dir, "dubbed_audio.wav")
+        final_audio.write_audiofile(
+            temp_audio_path,
+            fps=16000,
+            codec='pcm_s16le',
+            nbytes=2,
+            logger=None
+        )
         
-        # Step 6: Create dubbed video
+        # Create video
         update_job_status(job_id, "creating_video", 85)
         
-        temp_dubbed_path = os.path.join(temp_dir, "temp_dubbed.mp4")
+        temp_video_path = os.path.join(temp_dir, "dubbed_video.mp4")
         
-        final_audio_clip = AudioFileClip(temp_final_audio)
+        final_audio_clip = AudioFileClip(temp_audio_path)
         final_video = video.set_audio(final_audio_clip)
         
         final_video.write_videofile(
-            temp_dubbed_path,
+            temp_video_path,
             codec="libx264",
             audio_codec="aac",
-            logger=None,
-            temp_audiofile=os.path.join(temp_dir, "temp_audio.m4a")
+            bitrate="5000k",
+            logger=None
         )
         
         # Cleanup
         video.close()
         final_audio_clip.close()
         final_video.close()
+        final_audio.close()
+        base_audio.close()
+        
         for seg in audio_segments:
             try:
                 seg.close()
             except:
                 pass
         
-        # Step 7: Apply lip sync
+        # Apply lip sync
         update_job_status(job_id, "applying_lip_sync", 90)
         
-        output_filename = f"{os.path.splitext(filename)[0]}_dubbed_{target_language}_lipsynced.mp4"
+        output_filename = f"{os.path.splitext(filename)[0]}_dubbed_{target_language}.mp4"
         output_path = os.path.join(temp_dir, output_filename)
         
         try:
             await apply_lip_sync(
-                video_path=file_path,  # Original video
-                audio_path=temp_final_audio,  # Dubbed audio
+                video_path=file_path,
+                audio_path=temp_audio_path,
                 output_path=output_path
             )
-            print("LIP SYNC COMPLETE")
         except Exception as e:
-            print(f"LIP SYNC ERROR: {e}")
-            print("Using non-lip-synced video as fallback")
-            shutil.move(temp_dubbed_path, output_path)
+            print(f"Lip sync failed: {e}, using dubbed video")
+            shutil.move(temp_video_path, output_path)
+        
+        # Cleanup temp files
+        for seg_file in segment_files:
+            try:
+                os.remove(seg_file)
+            except:
+                pass
         
         update_job_status(job_id, "completed", 100, result=output_path)
         
     except DubbingError as e:
-        error_msg = f"{e.stage} failed: {e.detail}"
-        update_job_status(job_id, "failed", error=error_msg)
+        update_job_status(job_id, "failed", error=f"{e.stage}: {e.detail}")
     except Exception as e:
-        error_msg = f"Unexpected error: {str(e)}\n{traceback.format_exc()}"
-        update_job_status(job_id, "failed", error=error_msg)
+        update_job_status(job_id, "failed", error=str(e))
 
 @app.get("/")
 def read_root():
     return {
-        "message": "Polydub v6.0 - Video Dubbing Service",
+        "message": "Polydub v7.0 - Refined Video Dubbing",
         "features": [
-            "WhisperX word-level transcription",
-            "GPT-4o smart translation",
+            "WhisperX transcription",
+            "Natural translation (quality over literal)",
             "XTTS voice cloning",
-            "Perfect synchronization",
+            "Minimal speed adjustment (max 15%)",
             "LatentSync lip synchronization"
         ],
         "endpoints": {
-            "/upload": "POST - Upload video for dubbing",
-            "/status/{job_id}": "GET - Check job status",
-            "/download/{job_id}": "GET - Download completed video",
-            "/languages": "GET - List supported languages",
-            "/formats": "GET - List supported video formats"
+            "/upload": "POST - Upload video",
+            "/status/{job_id}": "GET - Check status",
+            "/download/{job_id}": "GET - Download result",
+            "/languages": "GET - Supported languages",
+            "/formats": "GET - Supported formats"
         }
     }
 
@@ -727,12 +658,6 @@ async def upload_video(
     file: UploadFile = File(...),
     target_language: str = Form(...)
 ):
-    print("\n" + "="*50)
-    print("NEW UPLOAD REQUEST")
-    print(f"File: {file.filename}")
-    print(f"Target language: {target_language}")
-    print("="*50 + "\n")
-    
     file_size = 0
     temp_dir = None
     
@@ -747,13 +672,13 @@ async def upload_video(
         # Validate
         file_ext = os.path.splitext(file.filename)[1].lower()
         if file_ext not in SUPPORTED_VIDEO_FORMATS:
-            raise HTTPException(status_code=400, detail=f"Unsupported format")
+            raise HTTPException(status_code=400, detail="Unsupported format")
         
         if target_language not in SUPPORTED_LANGUAGES:
-            raise HTTPException(status_code=400, detail=f"Unsupported language")
+            raise HTTPException(status_code=400, detail="Unsupported language")
         
         if file_size > settings.max_file_size_mb * 1024 * 1024:
-            raise HTTPException(status_code=400, detail=f"File too large")
+            raise HTTPException(status_code=400, detail="File too large")
         
         # Create job
         job_id = str(uuid.uuid4())
@@ -779,7 +704,7 @@ async def upload_video(
         
         return {
             "job_id": job_id,
-            "message": "Video processing started",
+            "message": "Processing started",
             "status_url": f"/status/{job_id}",
             "download_url": f"/download/{job_id}"
         }
@@ -797,7 +722,6 @@ async def upload_video(
 def get_status(job_id: str):
     if job_id not in job_status:
         raise HTTPException(status_code=404, detail="Job not found")
-    
     return job_status[job_id]
 
 @app.get("/download/{job_id}")
@@ -808,10 +732,7 @@ def download_video(job_id: str):
     status = job_status[job_id]
     
     if status["status"] != "completed":
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Job not completed. Current status: {status['status']}"
-        )
+        raise HTTPException(status_code=400, detail=f"Job not completed")
     
     if not status["result"] or not os.path.exists(status["result"]):
         raise HTTPException(status_code=404, detail="Output file not found")
