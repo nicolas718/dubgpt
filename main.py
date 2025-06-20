@@ -238,49 +238,42 @@ def group_words_into_dubbing_segments(segments: List[TimedSegment], target_durat
     return dubbing_segments
 
 async def smart_translate_segment(segment: TimedSegment, target_language: str, context: str = "") -> str:
-    """Translate with focus on direct translation and natural speech timing"""
+    """Translate for dubbing - accurate translation that fits timing"""
     
-    # Language expansion factors - adjusted for more direct translation
+    # Language expansion factors
     expansion_factors = {
-        "es": 1.15, "fr": 1.20, "de": 1.10, "it": 1.10,
-        "pt": 1.15, "ru": 0.85, "ja": 0.70, "ko": 0.75,
-        "zh": 0.50, "ar": 1.05, "hi": 1.10
+        "es": 1.20, "fr": 1.25, "de": 1.15, "it": 1.15,
+        "pt": 1.20, "ru": 0.85, "ja": 0.65, "ko": 0.70,
+        "zh": 0.45, "ar": 1.05, "hi": 1.10
     }
     
-    expansion = expansion_factors.get(target_language, 1.10)
+    expansion = expansion_factors.get(target_language, 1.15)
     
-    # Use more of the available time to allow direct translation
-    safe_duration = segment.duration * 0.95  # Use 95% of time (was 80%)
-    target_chars = int(len(segment.text) / expansion * 0.90)
-    max_chars = int(target_chars * 1.15)  # More flexibility
+    # Target for natural pacing
+    safe_duration = segment.duration * 0.85  # Use 85% of time
+    target_chars = int(len(segment.text) / expansion * 0.85)
+    max_chars = int(target_chars * 1.1)  # Strict maximum
     
     # Clean the text
     clean_text = segment.text.strip()
     clean_text = ' '.join(clean_text.split())  # Remove extra spaces
     
-    prompt = f"""You are dubbing a video from English to {LANGUAGE_NAMES.get(target_language, target_language)}.
+    prompt = f"""Translate this English text to {LANGUAGE_NAMES.get(target_language, target_language)} for video dubbing.
 
 Original: "{clean_text}"
 Duration: {segment.duration:.1f} seconds
-Character target: {target_chars} (MAX: {max_chars})
+Character limit: {max_chars} characters maximum
 
-PRIORITIES (in order):
-1. Keep as many direct word translations as possible
-2. Preserve the exact core meaning and emotion
-3. MUST fit naturally in {safe_duration:.1f} seconds without rushing
-4. Sound natural when spoken at normal speed
+Requirements:
+1. Accurate translation in proper {target_language}
+2. Must fit within {max_chars} characters
+3. Keep the meaning and emotion intact
+4. Natural spoken {target_language} - how a native speaker would say it
+5. Remove filler words (um, uh, well)
 
-TRANSLATION APPROACH:
-- Start with direct word-for-word translation
-- Only simplify if it exceeds time limit
-- Keep original sentence structure when possible
-- Remove only filler words (um, uh, well)
-- Maintain key terms and proper nouns exactly
-- If you must shorten, remove adjectives/adverbs first, keep core nouns/verbs
+Context: {context[-150:] if context else 'Start of video'}
 
-Previous context: {context[-150:] if context else 'Beginning of video'}
-
-Return ONLY the {target_language} translation, no explanations."""
+Provide ONLY the {target_language} translation, nothing else."""
 
     try:
         output = replicate.run(
@@ -322,7 +315,7 @@ async def generate_dubbed_segment(
     speaker_audio_path: str,
     output_path: str
 ) -> str:
-    """Generate dubbed audio with minimal speed adjustment for natural sound"""
+    """Generate dubbed audio with minimal speed adjustment"""
     try:
         # Generate audio with XTTS
         with open(speaker_audio_path, "rb") as audio_file:
@@ -357,71 +350,55 @@ async def generate_dubbed_segment(
         actual_duration = audio_clip.duration
         audio_clip.close()
         
-        # Priority: Natural sound over perfect fit
-        target_duration = segment.duration * 0.98  # Use 98% to prevent cutoff
-        
-        if actual_duration > target_duration:
-            speed_factor = actual_duration / target_duration
+        # Handle duration mismatch
+        if actual_duration > segment.duration:
+            speed_factor = actual_duration / segment.duration
             
-            # VERY minimal speedup - max 10% for natural sound
-            if speed_factor > 1.10:
-                print(f"WARNING: Segment needs {speed_factor:.2f}x speed - keeping natural at 1.10x")
-                speed_factor = 1.10
-                # Let translation handle timing instead of aggressive speedup
+            # Maximum 15% speedup for natural sound
+            if speed_factor > 1.15:
+                print(f"WARNING: Segment {output_path} needs {speed_factor:.2f}x speed")
+                speed_factor = 1.15
             
-            # Only apply speed if really needed
-            if speed_factor > 1.02:  # Only speed up if more than 2% over
-                # Apply gentle speed adjustment
-                cmd = [
-                    'ffmpeg', '-i', temp_path,
-                    '-filter:a', f'atempo={speed_factor}',
-                    '-ar', '16000',
-                    '-y', output_path
-                ]
-                
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                
-                if result.returncode != 0:
-                    print(f"FFmpeg speed adjustment failed: {result.stderr}")
-                    shutil.move(temp_path, output_path)
-                else:
-                    os.remove(temp_path)
-            else:
-                # No speed adjustment needed
-                shutil.move(temp_path, output_path)
-            
-            # Final duration check - gentle trim only if absolutely necessary
-            final_clip = AudioFileClip(output_path)
-            final_duration = final_clip.duration
-            final_clip.close()
-            
-            if final_duration > segment.duration + 0.05:  # Only trim if >50ms over
-                # Very gentle fade to prevent cutoff
-                fade_duration = min(0.15, segment.duration * 0.1)
-                fade_start = segment.duration - fade_duration
-                
-                trim_cmd = [
-                    'ffmpeg', '-i', output_path,
-                    '-t', str(segment.duration),
-                    '-af', f'afade=t=out:st={fade_start}:d={fade_duration}',
-                    '-ar', '16000',
-                    '-y', output_path + '_trim.wav'
-                ]
-                
-                result = subprocess.run(trim_cmd, capture_output=True, text=True)
-                
-                if result.returncode == 0 and os.path.exists(output_path + '_trim.wav'):
-                    os.remove(output_path)
-                    os.rename(output_path + '_trim.wav', output_path)
-        else:
-            # Audio fits perfectly - just ensure consistent sample rate
+            # Apply speed adjustment
             cmd = [
                 'ffmpeg', '-i', temp_path,
-                '-ar', '16000',
+                '-filter:a', f'atempo={speed_factor}',
                 '-y', output_path
             ]
-            subprocess.run(cmd, capture_output=True, text=True)
-            os.remove(temp_path)
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                print(f"FFmpeg speed adjustment failed: {result.stderr}")
+                shutil.move(temp_path, output_path)
+            else:
+                os.remove(temp_path)
+                
+                # Verify final duration and hard trim if needed
+                final_clip = AudioFileClip(output_path)
+                final_duration = final_clip.duration
+                final_clip.close()
+                
+                if final_duration > segment.duration + 0.01:
+                    # Hard trim with fade
+                    fade_duration = min(0.05, segment.duration * 0.1)
+                    fade_start = segment.duration - fade_duration
+                    
+                    trim_cmd = [
+                        'ffmpeg', '-i', output_path,
+                        '-t', str(segment.duration),
+                        '-af', f'afade=out=st={fade_start}:d={fade_duration}',
+                        '-y', output_path + '_trim.wav'
+                    ]
+                    
+                    subprocess.run(trim_cmd, capture_output=True)
+                    
+                    if os.path.exists(output_path + '_trim.wav'):
+                        os.remove(output_path)
+                        os.rename(output_path + '_trim.wav', output_path)
+        else:
+            # Audio fits perfectly
+            shutil.move(temp_path, output_path)
         
         return output_path
         
