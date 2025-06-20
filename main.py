@@ -138,26 +138,42 @@ def extract_word_timings_from_whisperx(whisperx_output: dict) -> List[TimedSegme
     return segments
 
 def group_words_into_dubbing_segments(segments: List[TimedSegment], target_duration: float = 4.0) -> List[TimedSegment]:
-    """Group words into segments with clean boundaries"""
+    """Group words into segments with clean boundaries - prioritizing natural speech"""
     dubbing_segments = []
     
-    # Collect all words
+    # Collect all words with timing validation
     all_words = []
     for segment in segments:
         if segment.words:
-            all_words.extend(segment.words)
+            for word in segment.words:
+                # Validate word timings
+                if word.start >= 0 and word.end > word.start:
+                    all_words.append(word)
         else:
-            word = WordTiming(
-                word=segment.text,
-                start=segment.start_time,
-                end=segment.end_time
-            )
-            all_words.append(word)
+            if segment.start_time >= 0 and segment.end_time > segment.start_time:
+                word = WordTiming(
+                    word=segment.text,
+                    start=segment.start_time,
+                    end=segment.end_time
+                )
+                all_words.append(word)
     
     if not all_words:
         return segments
     
+    # Sort and fix any timing overlaps
     all_words.sort(key=lambda w: w.start)
+    
+    # Fix overlapping words with minimal adjustment
+    for i in range(1, len(all_words)):
+        if all_words[i].start < all_words[i-1].end:
+            # Small gap to prevent overlap
+            gap = 0.02  # 20ms gap
+            all_words[i] = WordTiming(
+                word=all_words[i].word,
+                start=all_words[i-1].end + gap,
+                end=max(all_words[i].end, all_words[i-1].end + gap * 2)
+            )
     
     current_words = []
     current_start = None
@@ -173,31 +189,35 @@ def group_words_into_dubbing_segments(segments: List[TimedSegment], target_durat
         
         word_text = word.word.strip()
         
-        # Natural break points
+        # Natural break points - prioritize sentence boundaries
         if word_text.endswith(('.', '!', '?')) and duration >= 1.5:
             should_segment = True
         elif word_text.endswith((',', ';', ':')) and duration >= 2.5:
             should_segment = True
-        elif duration >= target_duration:
+        elif duration >= target_duration:  # Use full target duration
             should_segment = True
         elif i < len(all_words) - 1:
             next_word = all_words[i + 1]
             pause_duration = next_word.start - word.end
-            if pause_duration > 0.5 and duration >= 1.0:
+            # Natural pause detection
+            if pause_duration > 0.4 and duration >= 1.0:
                 should_segment = True
         elif i == len(all_words) - 1:
             should_segment = True
         
         if should_segment and current_words:
-            # Ensure clean boundaries with buffer
+            # Create segment with timing buffer for natural speech
             segment_start = current_start
             segment_end = current_words[-1].end
             
-            # Add 20ms buffer to prevent overlaps
+            # Add small buffer to ensure no cutoff
+            buffer = 0.05  # 50ms buffer (reduced from 100ms)
             if i < len(all_words) - 1:
                 next_start = all_words[i + 1].start
-                if segment_end > next_start - 0.02:
-                    segment_end = next_start - 0.02
+                max_end = next_start - 0.03  # Small gap before next
+                segment_end = min(segment_end + buffer, max_end)
+            else:
+                segment_end += buffer  # Buffer for last segment
             
             text = ' '.join([w.word for w in current_words])
             dubbing_segment = TimedSegment(
@@ -208,31 +228,31 @@ def group_words_into_dubbing_segments(segments: List[TimedSegment], target_durat
                 words=current_words.copy()
             )
             
-            if dubbing_segment.duration > 0.1:  # Skip micro-segments
+            if dubbing_segment.duration > 0.3:  # Skip very short segments
                 dubbing_segments.append(dubbing_segment)
             
             current_words = []
             current_start = None
     
-    print(f"Created {len(dubbing_segments)} dubbing segments")
+    print(f"Created {len(dubbing_segments)} dubbing segments optimized for natural speech")
     return dubbing_segments
 
 async def smart_translate_segment(segment: TimedSegment, target_language: str, context: str = "") -> str:
-    """Translate for natural dubbing - quality over literal accuracy"""
+    """Translate with focus on direct translation and natural speech timing"""
     
-    # Language expansion factors
+    # Language expansion factors - adjusted for more direct translation
     expansion_factors = {
-        "es": 1.20, "fr": 1.25, "de": 1.15, "it": 1.15,
-        "pt": 1.20, "ru": 0.85, "ja": 0.65, "ko": 0.70,
-        "zh": 0.45, "ar": 1.05, "hi": 1.10
+        "es": 1.15, "fr": 1.20, "de": 1.10, "it": 1.10,
+        "pt": 1.15, "ru": 0.85, "ja": 0.70, "ko": 0.75,
+        "zh": 0.50, "ar": 1.05, "hi": 1.10
     }
     
-    expansion = expansion_factors.get(target_language, 1.15)
+    expansion = expansion_factors.get(target_language, 1.10)
     
-    # Conservative targets for natural pacing
-    safe_duration = segment.duration * 0.80  # Use only 80% of time
-    target_chars = int(len(segment.text) / expansion * 0.80)
-    max_chars = int(target_chars * 1.1)  # Absolute maximum
+    # Use more of the available time to allow direct translation
+    safe_duration = segment.duration * 0.95  # Use 95% of time (was 80%)
+    target_chars = int(len(segment.text) / expansion * 0.90)
+    max_chars = int(target_chars * 1.15)  # More flexibility
     
     # Clean the text
     clean_text = segment.text.strip()
@@ -244,16 +264,19 @@ Original: "{clean_text}"
 Duration: {segment.duration:.1f} seconds
 Character target: {target_chars} (MAX: {max_chars})
 
-CRITICAL RULES:
-1. The translation MUST sound natural when spoken at normal speed
-2. MUST be under {max_chars} characters
-3. Preserve the core meaning and emotion
-4. Use common, conversational language
-5. Remove ALL filler words (um, uh, well, you know, I mean)
-6. Use contractions where natural
-7. If too long, keep key points and drop details
+PRIORITIES (in order):
+1. Keep as many direct word translations as possible
+2. Preserve the exact core meaning and emotion
+3. MUST fit naturally in {safe_duration:.1f} seconds without rushing
+4. Sound natural when spoken at normal speed
 
-IMPORTANT: The dubbed speech must fit comfortably in {safe_duration:.1f} seconds.
+TRANSLATION APPROACH:
+- Start with direct word-for-word translation
+- Only simplify if it exceeds time limit
+- Keep original sentence structure when possible
+- Remove only filler words (um, uh, well)
+- Maintain key terms and proper nouns exactly
+- If you must shorten, remove adjectives/adverbs first, keep core nouns/verbs
 
 Previous context: {context[-150:] if context else 'Beginning of video'}
 
@@ -299,7 +322,7 @@ async def generate_dubbed_segment(
     speaker_audio_path: str,
     output_path: str
 ) -> str:
-    """Generate dubbed audio with minimal speed adjustment"""
+    """Generate dubbed audio with minimal speed adjustment for natural sound"""
     try:
         # Generate audio with XTTS
         with open(speaker_audio_path, "rb") as audio_file:
@@ -334,55 +357,71 @@ async def generate_dubbed_segment(
         actual_duration = audio_clip.duration
         audio_clip.close()
         
-        # Handle duration mismatch
-        if actual_duration > segment.duration:
-            speed_factor = actual_duration / segment.duration
+        # Priority: Natural sound over perfect fit
+        target_duration = segment.duration * 0.98  # Use 98% to prevent cutoff
+        
+        if actual_duration > target_duration:
+            speed_factor = actual_duration / target_duration
             
-            # Maximum 15% speedup for natural sound
-            if speed_factor > 1.15:
-                print(f"WARNING: Segment {output_path} needs {speed_factor:.2f}x speed")
-                speed_factor = 1.15
+            # VERY minimal speedup - max 10% for natural sound
+            if speed_factor > 1.10:
+                print(f"WARNING: Segment needs {speed_factor:.2f}x speed - keeping natural at 1.10x")
+                speed_factor = 1.10
+                # Let translation handle timing instead of aggressive speedup
             
-            # Apply speed adjustment
+            # Only apply speed if really needed
+            if speed_factor > 1.02:  # Only speed up if more than 2% over
+                # Apply gentle speed adjustment
+                cmd = [
+                    'ffmpeg', '-i', temp_path,
+                    '-filter:a', f'atempo={speed_factor}',
+                    '-ar', '16000',
+                    '-y', output_path
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    print(f"FFmpeg speed adjustment failed: {result.stderr}")
+                    shutil.move(temp_path, output_path)
+                else:
+                    os.remove(temp_path)
+            else:
+                # No speed adjustment needed
+                shutil.move(temp_path, output_path)
+            
+            # Final duration check - gentle trim only if absolutely necessary
+            final_clip = AudioFileClip(output_path)
+            final_duration = final_clip.duration
+            final_clip.close()
+            
+            if final_duration > segment.duration + 0.05:  # Only trim if >50ms over
+                # Very gentle fade to prevent cutoff
+                fade_duration = min(0.15, segment.duration * 0.1)
+                fade_start = segment.duration - fade_duration
+                
+                trim_cmd = [
+                    'ffmpeg', '-i', output_path,
+                    '-t', str(segment.duration),
+                    '-af', f'afade=t=out:st={fade_start}:d={fade_duration}',
+                    '-ar', '16000',
+                    '-y', output_path + '_trim.wav'
+                ]
+                
+                result = subprocess.run(trim_cmd, capture_output=True, text=True)
+                
+                if result.returncode == 0 and os.path.exists(output_path + '_trim.wav'):
+                    os.remove(output_path)
+                    os.rename(output_path + '_trim.wav', output_path)
+        else:
+            # Audio fits perfectly - just ensure consistent sample rate
             cmd = [
                 'ffmpeg', '-i', temp_path,
-                '-filter:a', f'atempo={speed_factor}',
+                '-ar', '16000',
                 '-y', output_path
             ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                print(f"FFmpeg speed adjustment failed: {result.stderr}")
-                shutil.move(temp_path, output_path)
-            else:
-                os.remove(temp_path)
-                
-                # Verify final duration and hard trim if needed
-                final_clip = AudioFileClip(output_path)
-                final_duration = final_clip.duration
-                final_clip.close()
-                
-                if final_duration > segment.duration + 0.01:
-                    # Hard trim with fade
-                    fade_duration = min(0.05, segment.duration * 0.1)
-                    fade_start = segment.duration - fade_duration
-                    
-                    trim_cmd = [
-                        'ffmpeg', '-i', output_path,
-                        '-t', str(segment.duration),
-                        '-af', f'afade=out=st={fade_start}:d={fade_duration}',
-                        '-y', output_path + '_trim.wav'
-                    ]
-                    
-                    subprocess.run(trim_cmd, capture_output=True)
-                    
-                    if os.path.exists(output_path + '_trim.wav'):
-                        os.remove(output_path)
-                        os.rename(output_path + '_trim.wav', output_path)
-        else:
-            # Audio fits perfectly
-            shutil.move(temp_path, output_path)
+            subprocess.run(cmd, capture_output=True, text=True)
+            os.remove(temp_path)
         
         return output_path
         
@@ -458,7 +497,7 @@ async def process_video_with_perfect_sync(
         video.audio.write_audiofile(
             audio_path, 
             codec='pcm_s16le',
-            fps=16000,  # Standard for speech
+            fps=16000,
             nbytes=2,
             logger=None
         )
@@ -481,6 +520,7 @@ async def process_video_with_perfect_sync(
         if not segments:
             raise DubbingError("transcription", "No segments extracted")
         
+        # Use shorter target duration for better control
         dubbing_segments = group_words_into_dubbing_segments(segments, target_duration=3.5)
         
         # Translate
@@ -498,7 +538,7 @@ async def process_video_with_perfect_sync(
                 "segment": segment,
                 "translation": translated_text
             })
-            context = translated_text  # Only recent context
+            context = translated_text
         
         # Generate audio
         update_job_status(job_id, "generating_audio", 50)
@@ -530,14 +570,21 @@ async def process_video_with_perfect_sync(
                 if os.path.exists(segment_path):
                     segment_files.append(segment_path)
                     
-                    # Load and position audio
+                    # Load and position audio with validation
                     audio_seg = AudioFileClip(segment_path)
                     
-                    # Ensure no duration overflow
-                    if audio_seg.duration > segment.duration:
-                        audio_seg = audio_seg.subclip(0, segment.duration)
+                    # Ensure segment fits in its time slot
+                    max_duration = segment.duration
+                    if audio_seg.duration > max_duration:
+                        audio_seg = audio_seg.subclip(0, max_duration)
                     
+                    # Set precise start time
                     audio_seg = audio_seg.set_start(segment.start_time)
+                    
+                    # Add fade in/out to prevent pops
+                    fade_duration = min(0.05, audio_seg.duration * 0.1)
+                    audio_seg = audio_seg.audio_fadein(fade_duration).audio_fadeout(fade_duration)
+                    
                     audio_segments.append(audio_seg)
                     
             except Exception as e:
@@ -547,14 +594,16 @@ async def process_video_with_perfect_sync(
         if not audio_segments:
             raise DubbingError("audio_generation", "No audio segments generated")
         
-        # Combine audio
+        # Combine audio with gap filling
         update_job_status(job_id, "combining_audio", 75)
         
-        # Create clean composite
+        # Create silence base
         base_audio = AudioClip(lambda t: 0, duration=original_duration)
-        base_audio.fps = 16000
+        base_audio = base_audio.set_fps(16000)
         
+        # Composite with precise timing
         final_audio = CompositeAudioClip([base_audio] + audio_segments)
+        final_audio = final_audio.set_fps(16000)
         
         temp_audio_path = os.path.join(temp_dir, "dubbed_audio.wav")
         final_audio.write_audiofile(
@@ -573,11 +622,14 @@ async def process_video_with_perfect_sync(
         final_audio_clip = AudioFileClip(temp_audio_path)
         final_video = video.set_audio(final_audio_clip)
         
+        # Write with consistent settings
         final_video.write_videofile(
             temp_video_path,
             codec="libx264",
             audio_codec="aac",
+            audio_bitrate="128k",
             bitrate="5000k",
+            fps=video.fps,
             logger=None
         )
         
@@ -632,7 +684,7 @@ def read_root():
             "WhisperX transcription",
             "Natural translation (quality over literal)",
             "XTTS voice cloning",
-            "Minimal speed adjustment (max 15%)",
+            "Minimal speed adjustment (max 20%)",
             "LatentSync lip synchronization"
         ],
         "endpoints": {
