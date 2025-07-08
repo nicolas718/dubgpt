@@ -599,14 +599,20 @@ async def process_video_with_perfect_sync(
         final_audio_clip = AudioFileClip(temp_audio_path)
         final_video = video.set_audio(final_audio_clip)
         
-        # Write with consistent settings
+        # Write with high quality settings
         final_video.write_videofile(
             temp_video_path,
             codec="libx264",
             audio_codec="aac",
-            audio_bitrate="128k",
-            bitrate="5000k",
+            audio_bitrate="192k",  # Increased from 128k
+            bitrate="8000k",  # Increased from 5000k
             fps=video.fps,
+            preset="slow",  # Better compression quality
+            ffmpeg_params=[
+                "-crf", "18",  # Lower CRF = higher quality (range: 0-51, 18 is visually lossless)
+                "-pix_fmt", "yuv420p",  # Compatibility
+                "-movflags", "+faststart"  # Better streaming
+            ],
             logger=None
         )
         
