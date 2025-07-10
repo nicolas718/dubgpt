@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import aiofiles
 import requests
 import replicate
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Header, Depends
 from fastapi.responses import JSONResponse, FileResponse
 from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_audioclips, CompositeAudioClip
 from moviepy.audio.AudioClip import AudioClip
@@ -37,6 +37,7 @@ class TimedSegment:
 class Settings:
     def __init__(self):
         self.replicate_api_token = os.getenv("REPLICATE_API_TOKEN")
+        self.private_api_key = os.getenv("PRIVATE_API_KEY")
         self.whisperx_model = "victor-upmeet/whisperx:84d2ad2d6194fe98a17d2b60bef1c7f910c46b2f6fd38996ca457afd9c8abfcb"
         self.gpt4o_model = "openai/gpt-4o"
         self.xtts_model = "lucataco/xtts-v2:684bc3855b37866c0c65add2ff39c78f3dea3f4ff103a436465326e0f438d55e"
@@ -61,6 +62,26 @@ class DubbingError(Exception):
         self.stage = stage
         self.detail = detail
         super().__init__(f"{stage}: {detail}")
+
+# API Key authentication dependency
+async def verify_api_key(api_key: str = Header(None, alias="X-API-Key")):
+    if not settings.private_api_key:
+        raise HTTPException(status_code=500, detail="API key not configured on server")
+    
+    if api_key != settings.private_api_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    return api_key
+
+# API Key authentication dependency
+async def verify_api_key(api_key: str = Header(None, alias="X-API-Key")):
+    if not settings.private_api_key:
+        raise HTTPException(status_code=500, detail="API key not configured on server")
+    
+    if api_key != settings.private_api_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    return api_key
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -653,6 +674,7 @@ async def process_video_with_perfect_sync(
     except Exception as e:
         update_job_status(job_id, "failed", error=str(e))
 
+# Public endpoints (no auth required)
 @app.get("/")
 def read_root():
     return {
@@ -665,9 +687,9 @@ def read_root():
             "LatentSync lip synchronization"
         ],
         "endpoints": {
-            "/upload": "POST - Upload video",
-            "/status/{job_id}": "GET - Check status",
-            "/download/{job_id}": "GET - Download result",
+            "/upload": "POST - Upload video (requires API key)",
+            "/status/{job_id}": "GET - Check status (requires API key)",
+            "/download/{job_id}": "GET - Download result (requires API key)",
             "/languages": "GET - Supported languages",
             "/formats": "GET - Supported formats"
         }
@@ -681,7 +703,15 @@ def get_languages():
 def get_formats():
     return {"supported_formats": SUPPORTED_VIDEO_FORMATS}
 
-@app.post("/upload")
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy",
+        "active_jobs": len([j for j in job_status.values() if j["status"] not in ["completed", "failed"]])
+    }
+
+# Protected endpoints (require API key)
+@app.post("/upload", dependencies=[Depends(verify_api_key)])
 async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -747,13 +777,13 @@ async def upload_video(
             shutil.rmtree(temp_dir)
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/status/{job_id}")
+@app.get("/status/{job_id}", dependencies=[Depends(verify_api_key)])
 def get_status(job_id: str):
     if job_id not in job_status:
         raise HTTPException(status_code=404, detail="Job not found")
     return job_status[job_id]
 
-@app.get("/download/{job_id}")
+@app.get("/download/{job_id}", dependencies=[Depends(verify_api_key)])
 def download_video(job_id: str):
     if job_id not in job_status:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -771,13 +801,6 @@ def download_video(job_id: str):
         media_type="video/mp4",
         filename=os.path.basename(status["result"])
     )
-
-@app.get("/health")
-def health_check():
-    return {
-        "status": "healthy",
-        "active_jobs": len([j for j in job_status.values() if j["status"] not in ["completed", "failed"]])
-    }
 
 if __name__ == "__main__":
     import uvicorn
